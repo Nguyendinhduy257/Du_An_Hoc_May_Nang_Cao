@@ -1,0 +1,17 @@
+# Batch trên Windows cần CRLF; mã nguồn và tài liệu dùng LF để tránh nhiễu diff.
+*.bat text eol=crlf
+*.py text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.sql text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.ipynb text eol=lf
+
+# Dữ liệu và file nhị phân không được đổi byte khi checkout.
+*.csv -text
+*.pkl binary
+*.dump binary
+*.zip binary

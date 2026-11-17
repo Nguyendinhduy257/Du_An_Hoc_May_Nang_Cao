@@ -1,0 +1,58 @@
+{
+  "generated_at": "2026-11-17T08:39:38.669694+00:00",
+  "model_run_id": 1,
+  "threshold": 0.41,
+  "dataset_split": "test",
+  "rows": 6062,
+  "label_balance": {
+    "true_fake_cg": 3029,
+    "true_real_or": 3033,
+    "fake_rate": 0.4997
+  },
+  "categories": {
+    "genuine": {
+      "count": 2944,
+      "true_fake": 208,
+      "true_real": 2736,
+      "fake_rate": 0.0707
+    },
+    "suspected_fake": {
+      "count": 2399,
+      "true_fake": 2200,
+      "true_real": 199,
+      "fake_rate": 0.917
+    },
+    "suspected_bot_boost": {
+      "count": 719,
+      "true_fake": 621,
+      "true_real": 98,
+      "fake_rate": 0.8637
+    },
+    "low_content": {
+      "count": 0,
+      "true_fake": 0,
+      "true_real": 0,
+      "fake_rate": 0.0
+    },
+    "spam_duplicate": {
+      "count": 0,
+      "true_fake": 0,
+      "true_real": 0,
+      "fake_rate": 0.0
+    }
+  },
+  "useful_set": {
+    "count": 2942,
+    "true_real": 2734,
+    "true_fake": 208,
+    "precision_real": 0.9293,
+    "recall_real": 0.9014,
+    "lost_real": 299
+  },
+  "bot_boost_lift": 1.7284,
+  "notes": [
+    "Nhóm 'genuine', 'suspected_fake', 'suspected_bot_boost' là luật hiển thị, không phải nhãn ground truth.",
+    "Dataset gốc chỉ có nhãn CG (máy sinh) và OR (người viết), không có nhãn bot/boost/spam.",
+    "useful_set.precision_real là tỷ lệ review thật trong tập hữu ích; đây là con số nên dùng khi báo cáo, thay vì nói 'độ chính xác phát hiện bot'."
+  ]
+}

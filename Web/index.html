@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<!--
+  Đường dẫn: Du_An_Hoc_May_Nang_Cao\Web\index.html
+  Mục đích : Khung trang kiểm tra review cho đồ án Fake Review Detection.
+  Input    : data_meta.js + data_reviews.js (sinh bởi MaNguon/export_web_data.py)
+             + app.js + style.css
+  Output   : trang HTML tĩnh; mở bằng double-click để xem demo, hoặc mở qua
+             http://127.0.0.1:8000/ để dùng được nhập tay và tải file CSV.
+
+  Lưu ý kỹ thuật: các thẻ <script> bên dưới là loại "classic", KHÔNG dùng
+  type="module", vì Chrome chặn module khi mở qua giao thức file://.
+  app.js tự chèn thêm <script src="data_reviews.js"> khi cần vẽ bảng.
+-->
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Review nào đáng tin? - Fake Review Detection</title>
+  <!-- Icon rỗng: tránh trình duyệt tự gọi /favicon.ico và báo 404 trong console. -->
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+
+  <!-- Đọc chế độ sáng/tối đã lưu TRƯỚC khi trình duyệt vẽ trang, để người
+       dùng chế độ tối không thấy một nháy trắng. Phải là script thường
+       (không dùng module) vì Chrome chặn module khi mở qua file://. -->
+  <script>
+    (function () {
+      var theme = "light";
+      try {
+        var stored = window.localStorage.getItem("fake-review-theme");
+        if (stored === "dark" || stored === "light") {
+          theme = stored;
+        }
+      } catch (error) {
+        // Trình duyệt chặn localStorage: giữ mặc định nền sáng.
+      }
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
+</head>
+<body>
+
+  <!-- Màn hình chờ dùng hiệu ứng giọt lỏng (Gooey).
+       Hiện ngay từ đầu và do app.js tắt đi khi chạy xong, nên người xem thấy
+       hệ thống "đang xử lý" thay vì kết quả demo bật ra sẵn. -->
+  <div class="loader-screen" id="loader-screen" role="status" aria-live="polite">
+    <div class="loader-panel">
+      <div class="goo-stage" aria-hidden="true">
+        <span class="goo-blob goo-blob-1"></span>
+        <span class="goo-blob goo-blob-2"></span>
+        <span class="goo-blob goo-blob-3"></span>
+        <span class="goo-blob goo-blob-4"></span>
+        <span class="goo-blob goo-blob-5"></span>
+      </div>
+      <p class="loader-kicker">Học máy nâng cao &middot; Logistic Regression + TF-IDF</p>
+      <h2 class="loader-title" id="loader-title">Đang khởi động mô hình</h2>
+      <p class="loader-detail" id="loader-detail"></p>
+      <!-- Kết quả cuối cùng của từng bước đã xong. app.js chỉ thêm dòng khi
+           bước đó thật sự hoàn tất, nên không có kết quả bịa trước. -->
+      <ol class="loader-log" id="loader-log" aria-label="Kết quả từng bước"></ol>
+      <div class="loader-track" id="loader-track" role="progressbar"
+           aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="loader-fill" id="loader-fill"></div>
+      </div>
+      <p class="loader-timer" id="loader-timer"></p>
+    </div>
+  </div>
+
+  <!-- Bộ lọc SVG tạo hiệu ứng gooey: làm nhoè các khối rồi tăng tương phản
+       alpha, nên các khối tròn "chảy" vào nhau như giọt lỏng. -->
+  <svg class="goo-defs" width="0" height="0" aria-hidden="true" focusable="false">
+    <filter id="goo-filter" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="10" result="blur"></feGaussianBlur>
+      <feColorMatrix in="blur" mode="matrix"
+                     values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 24 -10"
+                     result="goo"></feColorMatrix>
+      <feBlend in="SourceGraphic" in2="goo"></feBlend>
+    </filter>
+  </svg>
+
+  <header class="page-header">
+    <p class="eyebrow">Học máy nâng cao &middot; Logistic Regression + TF-IDF</p>
+    <h1>Review nào đáng tin?</h1>
+    <p class="subtitle">
+      Giữ lại review hữu ích, gắn cờ review đáng nghi, và so sánh phân bố 5 sao
+      trước / sau khi lọc.
+    </p>
+    <div class="header-row">
+      <div class="header-badges" id="header-badges"></div>
+
+      <div class="header-actions">
+        <!-- Bấm để chạy lại toàn bộ quá trình xử lý và xem màn hình chờ.
+             Nhãn hiện sau lần chạy đầu, tránh người xem bấm khi đang chờ. -->
+        <button type="button" class="replay-button" id="replay-button" hidden>
+          Chạy lại quá trình
+        </button>
+
+        <!-- Công tắc sáng/tối. Nhãn ghi hành động sẽ xảy ra khi bấm;
+             app.js đổi chữ và biểu tượng theo chế độ đang bật. -->
+        <button type="button" class="theme-toggle" id="theme-toggle"
+                aria-pressed="false" title="Chuyển sang nền tối">
+          <span class="theme-toggle-icon" id="theme-toggle-icon"
+                aria-hidden="true">&#9790;</span>
+          <span id="theme-toggle-text">Nền tối</span>
+        </button>
+
+        <!-- Đèn báo kết nối PostgreSQL. data-state được app.js đổi giữa
+             checking / connected / disconnected / offline; CSS tô màu theo đó.
+             Nằm ngoài #header-badges vì renderBadges() xoá sạch vùng đó mỗi lần vẽ lại. -->
+        <div class="db-status" id="db-status" data-state="checking"
+             title="Đang kiểm tra kết nối PostgreSQL.">
+          <span class="db-status-dot" aria-hidden="true"></span>
+          <span id="db-status-text">Đang kiểm tra CSDL...</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main id="app">
+
+    <!-- Chọn nguồn dữ liệu -->
+    <section class="card source-card">
+      <div class="source-tabs" role="tablist">
+        <button type="button" class="source-tab is-active" id="tab-demo">
+          Dữ liệu demo (tập test)
+        </button>
+        <button type="button" class="source-tab" id="tab-upload">
+          Tải file CSV của bạn
+        </button>
+      </div>
+      <p class="source-note" id="source-note"></p>
+    </section>
+
+    <!-- Bảng tải file CSV -->
+    <section class="card upload-card" id="upload-card" hidden>
+      <h2>Tải file CSV để phân tích</h2>
+      <p class="hint">
+        File cần có cột <code>text_</code> hoặc <code>text</code>. Hai cột
+        <code>rating</code> (1-5) và <code>category</code> là tùy chọn. Cột
+        <code>label</code> nếu có sẽ bị bỏ qua vì đây là dữ liệu chưa biết nhãn.
+      </p>
+
+      <div class="upload-row">
+        <input type="file" id="csv-file" accept=".csv,text/csv">
+        <span class="hint upload-inline-hint">
+          Chọn file xong, bảng sẽ hiện ra bên dưới để xem trước và sửa.
+        </span>
+      </div>
+
+      <p class="hint" id="upload-limit"></p>
+      <p class="upload-status" id="upload-status"></p>
+      <div class="upload-warnings" id="upload-warnings"></div>
+    </section>
+
+    <!-- Xem trước + sửa bảng CSV ngay trên web.
+         Vì sao có thẻ này: trước đây muốn sửa một ô phải mở Excel, lưu file,
+         rồi tải lại; nay sửa trực tiếp rồi bấm chạy. -->
+    <section class="card editor-card" id="editor-card" hidden>
+      <div class="section-heading">
+        <div>
+          <h2>Xem trước và sửa bảng dữ liệu</h2>
+          <p class="hint" id="editor-hint">
+            Sửa trực tiếp trong ô. Cột <code>text_</code> dùng ô nhiều dòng.
+          </p>
+        </div>
+        <span class="editor-count" id="editor-count"></span>
+      </div>
+
+      <div class="table-wrap editor-wrap">
+        <table class="editor-table">
+          <thead id="editor-head"></thead>
+          <tbody id="editor-body"></tbody>
+        </table>
+      </div>
+
+      <div class="editor-pager">
+        <button type="button" class="page-button" id="editor-prev">&lsaquo; Trước</button>
+        <span class="page-label" id="editor-page-label"></span>
+        <button type="button" class="page-button" id="editor-next">Sau &rsaquo;</button>
+        <button type="button" class="page-button" id="editor-add">+ Thêm dòng</button>
+      </div>
+
+      <label class="toggle">
+        <input type="checkbox" id="translate-upload" checked>
+        Dịch từng dòng sang tiếng Anh trước khi dự đoán (chậm, cần mạng)
+      </label>
+
+      <div class="editor-actions">
+        <button type="button" class="primary-button" id="editor-run">
+          Chạy phân tích bảng
+        </button>
+        <button type="button" class="secondary-button" id="editor-save">
+          Lưu CSV...
+        </button>
+        <span class="hint editor-status" id="editor-status"></span>
+      </div>
+    </section>
+
+    <!-- 5 thẻ nhóm + số review hữu ích -->
+    <section class="card" id="summary-card" hidden>
+      <div class="section-heading">
+        <div>
+          <h2>Kết quả phân loại</h2>
+          <p class="hint" id="summary-hint"></p>
+        </div>
+        <div class="useful-pill" id="useful-pill"></div>
+      </div>
+      <div class="category-grid" id="category-grid"></div>
+
+      <!-- Bảng giải thích cơ sở của từng nhóm. Vì sao đặt ngay dưới thẻ:
+           người xem phải biết nhóm nào do model, nhóm nào do luật quyết định
+           trước khi đọc con số, tránh hiểu nhầm luật là thuật toán học máy. -->
+      <div class="basis-banner">
+        <p class="basis-banner-title">Cách đọc nhãn</p>
+        <p>
+          <span class="basis-tag basis-model">MODEL</span> do mô hình Logistic
+          Regression quyết định.
+          <span class="basis-tag basis-rule">LUẬT</span> do luật đếm từ, so
+          trùng lặp hoặc số sao quyết định.
+          <span class="basis-tag basis-both">MODEL + LUẬT</span> do mô hình nói
+          "giả" và luật xác nhận "5 sao + nội dung ngắn".
+        </p>
+        <p>
+          Đây là nhãn suy luận để hiển thị, không phải ground truth. Dataset gốc
+          chỉ có CG (máy sinh) / OR (người viết), không có nhãn bot, boost hay
+          spam.
+        </p>
+      </div>
+
+      <p class="legend-note">
+        Dataset gốc chỉ có CG (máy sinh) / OR (người viết), không có nhãn bot,
+        boost hay spam. Các nhóm còn lại là luật suy luận để hiển thị.
+      </p>
+    </section>
+
+    <!-- Bảng phân bố 5 sao -->
+    <section class="card" id="star-card" hidden>
+      <div class="section-heading">
+        <div>
+          <h2>Phân bố 5 sao</h2>
+          <p class="hint">
+            So sánh toàn bộ review với phần còn lại sau khi chỉ giữ review hữu ích.
+            Số đếm là số bài review, không phải số người đánh giá.
+          </p>
+        </div>
+      </div>
+      <div class="star-panel" id="star-panel"></div>
+      <p class="hint" id="star-note"></p>
+    </section>
+
+    <!-- Bảng review + bộ lọc -->
+    <section class="card" id="table-card" hidden>
+      <div class="section-heading">
+        <div>
+          <h2 id="table-title">Review hữu ích</h2>
+          <p class="hint" id="table-hint"></p>
+        </div>
+      </div>
+
+      <div class="filter-chips" id="filter-chips"></div>
+      <p class="hint" id="table-count"></p>
+
+      <div class="table-wrap">
+        <table>
+          <thead id="table-head"></thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </div>
+
+      <div class="pagination" id="pagination">
+        <button type="button" class="page-button" id="page-first">&laquo; Đầu</button>
+        <button type="button" class="page-button" id="page-prev">&lsaquo; Trước</button>
+        <span class="page-label" id="page-label"></span>
+        <button type="button" class="page-button" id="page-next">Sau &rsaquo;</button>
+        <button type="button" class="page-button" id="page-last">Cuối &raquo;</button>
+      </div>
+    </section>
+
+    <!-- Nhập review và gọi API -->
+    <section class="card" id="predict-card">
+      <h2>Thử nhập review của bạn</h2>
+      <p class="hint">
+        Nhập review bằng <strong>bất kỳ ngôn ngữ nào</strong>: server dịch sang
+        tiếng Anh trước rồi mới dự đoán. Bấm một nút mẫu để điền nhanh, rồi bấm
+        <strong>Phân tích</strong>.
+      </p>
+      <p class="hint">
+        Lưu ý: dịch máy tạo ra văn phong "máy sinh", nên câu đã dịch có xu hướng
+        bị gọi là <strong>Giả</strong> cao hơn thực tế.
+      </p>
+
+      <div class="example-buttons" id="example-buttons"></div>
+
+      <textarea
+        id="review-input"
+        rows="5"
+        placeholder="Ví dụ: I used this blender for three weeks. It is louder than I expected, but it crushes ice fine."
+      ></textarea>
+
+      <div class="predict-actions">
+        <button id="predict-button" type="button">Phân tích</button>
+        <span class="hint" id="predict-status"></span>
+      </div>
+
+      <div class="predict-result" id="predict-result"></div>
+    </section>
+
+    <!-- Số liệu kỹ thuật, mặc định thu gọn -->
+    <details class="card technical" id="technical-section" hidden>
+      <summary>Số liệu kỹ thuật (dành cho báo cáo)</summary>
+
+      <div class="technical-body">
+        <section class="report-block">
+          <h2>Chỉ số tổng quan</h2>
+          <p class="hint">
+            Mọi chỉ số tính tại ngưỡng quyết định đã chọn trên tập val.
+            F1 là chỉ số chính vì nó cân bằng Precision và Recall.
+          </p>
+          <div class="kpi-grid" id="kpi-grid"></div>
+        </section>
+
+        <section class="report-block">
+          <h2>Confusion matrix</h2>
+          <p class="hint">
+            Hàng là nhãn thật, cột là nhãn model dự đoán.
+          </p>
+          <div class="confusion-grid" id="confusion-grid"></div>
+          <ul class="note-list" id="confusion-legend"></ul>
+        </section>
+
+        <section class="report-block">
+          <h2>Phân bố xác suất model gán nhãn Giả</h2>
+          <p class="hint">
+            Mỗi cột là số review rơi vào một khoảng xác suất. Hai màu là nhãn thật.
+            Đường nét đứt là ngưỡng quyết định.
+          </p>
+          <div class="chart-toolbar" id="histogram-legend"></div>
+          <div class="chart-box" id="histogram-chart"></div>
+        </section>
+
+        <section class="report-block">
+          <h2>Vì sao chọn ngưỡng đó - quét trên tập val</h2>
+          <p class="hint">
+            Mỗi điểm trên trục ngang là một ngưỡng thử. F1 đạt đỉnh ở ngưỡng
+            được chọn.
+          </p>
+          <div class="chart-toolbar" id="curve-legend"></div>
+          <div class="chart-box" id="curve-chart"></div>
+        </section>
+
+        <section class="report-block">
+          <h2>Độ tin cậy của xác suất (hiệu chuẩn)</h2>
+          <p class="hint">
+            Nếu model nói "70% là giả" thì thực tế phải có khoảng 70% review
+            trong nhóm đó là giả. Điểm càng gần đường chéo thì xác suất càng
+            đáng tin. Bán kính điểm thể hiện số review trong khoảng.
+          </p>
+          <div class="chart-toolbar" id="reliability-legend"></div>
+          <div class="chart-box" id="reliability-chart"></div>
+          <p class="hint" id="reliability-summary"></p>
+        </section>
+      </div>
+    </details>
+
+  </main>
+
+  <footer class="page-footer">
+    <p>
+      Dữ liệu: <em>fake-reviews-dataset</em> - Salminen et al. (2022),
+      giấy phép CC BY 4.0.
+    </p>
+    <p id="footer-meta"></p>
+    <p>
+      Lưu ý: nhãn CG/OR là "máy sinh" so với "người viết", không đồng nghĩa
+      "gian lận" so với "trung thực".
+    </p>
+  </footer>
+
+  <!-- Hộp thoại hỏi nơi lưu CSV. Vì sao phải hỏi: trình duyệt không được tự
+       ghi đè file người dùng đã chọn, nên phải để họ quyết định ghi đè file
+       gốc (kèm hộp thoại xin quyền của trình duyệt) hay tải bản sao riêng. -->
+  <div class="dialog-backdrop" id="save-dialog">
+    <div class="dialog" role="dialog" aria-modal="true"
+         aria-labelledby="save-dialog-title" aria-describedby="save-dialog-text">
+      <h2 id="save-dialog-title">Lưu bảng CSV ở đâu?</h2>
+      <p class="hint" id="save-dialog-text"></p>
+
+      <div class="dialog-choices">
+        <button type="button" class="dialog-choice" id="save-overwrite">
+          <strong>Cập nhật file gốc</strong>
+          <span id="save-overwrite-note">
+            Trình duyệt sẽ hỏi quyền ghi và bạn chọn lại đúng file CSV gốc.
+          </span>
+        </button>
+
+        <button type="button" class="dialog-choice" id="save-copy">
+          <strong>Tải thành bản CSV riêng</strong>
+          <span>Không đụng file gốc; file mới có hậu tố _da-sua.</span>
+        </button>
+      </div>
+
+      <button type="button" class="dialog-cancel" id="save-cancel">Huỷ</button>
+    </div>
+  </div>
+
+  <!-- Chỉ nạp phần thông tin nhẹ trước. app.js sẽ tự nạp data_reviews.js
+       khi cần, nên trang mở nhanh hơn và vẫn chạy được qua file://.
+       Dữ liệu nằm ở thư mục riêng DuLieuDemo/ (ngang cấp Web/), nên phải
+       dùng ../DuLieuDemo/. Chạy qua file:// thì trình duyệt đọc thẳng file;
+       chạy qua api_server.py thì ../ được chuẩn hoá thành /DuLieuDemo/. -->
+  <script src="../DuLieuDemo/data_meta.js"></script>
+  <!-- csv.js phải nạp trước app.js: app.js dùng window.CsvTools để đọc/ghi CSV. -->
+  <script src="csv.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

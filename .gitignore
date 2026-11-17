@@ -1,0 +1,34 @@
+# ===== Bảo mật: không đẩy cấu hình thật lên mạng =====
+.env
+*.env
+!*.env.example
+
+# ===== Python: cache và môi trường ảo =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# ===== Notebook =====
+.ipynb_checkpoints/
+
+# ===== File sinh ra trong lúc chạy =====
+KetQuaChay/run_state.json
+*.log
+*.tmp
+Thumbs.db
+.DS_Store
+~$*
+
+# ===== Sao lưu CSDL: chỉ đẩy bản seed sạch cho đồng đội =====
+SaoLuu/*
+*.dump
+!SaoLuu/fakereview_seed.dump
+
+# ===== File tải gốc từ Kaggle =====
+# Đã ghi SHA256 và nguồn trong DuLieuDeHoc/README.md + SOURCE.json.
+# Giữ file CSV đã chuẩn hoá để clone về chạy ngay; bỏ file zip trùng lặp.
+DuLieuDeHoc/DuLieuTho/fake-reviews-dataset.zip

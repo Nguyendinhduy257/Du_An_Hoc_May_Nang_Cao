@@ -1,0 +1,72 @@
+{
+  "dataset": "Fake Reviews Dataset (Salminen et al., 2022)",
+  "kaggle_ref": "mexwell/fake-reviews-dataset",
+  "url": "https://www.kaggle.com/datasets/mexwell/fake-reviews-dataset",
+  "download_endpoint": "https://www.kaggle.com/api/v1/datasets/download/mexwell/fake-reviews-dataset",
+  "license": "CC BY 4.0",
+  "citation": "Salminen, J., Kandpal, C., Kamel, A. M., Jung, S., & Jansen, B. J. (2022). Creating and detecting fake reviews of online products. Journal of Retailing and Consumer Services, 64, 102771. https://doi.org/10.1016/j.jretconser.2021.102771",
+  "zip_sha256": "5d55e1383ecf7f19fe6497a11f14116c2a72bbbbcd949727fedb533a03c635e7",
+  "zip_bytes": 5016888,
+  "csv_file": "fake reviews dataset.csv",
+  "csv_bytes": 15324616,
+  "rows": 40432,
+  "cols": [
+    "category",
+    "rating",
+    "label",
+    "text_"
+  ],
+  "downloaded_on": "2026-11-09",
+  "note": "OR = original/human reviews (real); CG = computer-generated fake reviews. Labels are balanced 20k/20k per dataset description.",
+  "audit": {
+    "rows": 40432,
+    "cols": 4,
+    "columns": [
+      "category",
+      "rating",
+      "label",
+      "text_"
+    ],
+    "label_counts": {
+      "CG": 20216,
+      "OR": 20216
+    },
+    "label_balanced": true,
+    "missing_values": {
+      "category": 0,
+      "rating": 0,
+      "label": 0,
+      "text_": 0
+    },
+    "duplicate_full_rows": 12,
+    "duplicate_texts": 20,
+    "empty_texts": 0,
+    "n_categories": 10,
+    "categories": {
+      "Kindle_Store_5": 4730,
+      "Books_5": 4370,
+      "Pet_Supplies_5": 4254,
+      "Home_and_Kitchen_5": 4056,
+      "Electronics_5": 3988,
+      "Sports_and_Outdoors_5": 3946,
+      "Tools_and_Home_Improvement_5": 3858,
+      "Clothing_Shoes_and_Jewelry_5": 3848,
+      "Toys_and_Games_5": 3794,
+      "Movies_and_TV_5": 3588
+    },
+    "rating_counts": {
+      "1": 2155,
+      "2": 1967,
+      "3": 3786,
+      "4": 7965,
+      "5": 24559
+    },
+    "text_len_chars": {
+      "min": 24,
+      "p50": 198,
+      "mean": 351.27,
+      "p95": 1209,
+      "max": 2827
+    }
+  }
+}

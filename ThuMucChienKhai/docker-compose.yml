@@ -1,0 +1,58 @@
+# ==================================================================
+# Đường dẫn: Du_An_Hoc_May_Nang_Cao\ThuMucChienKhai\docker-compose.yml
+# Mục đích : Dựng PostgreSQL 16 trong Docker cho đồ án Fake Review Detection.
+# Chạy     : docker compose up -d
+# Dừng     : docker compose down          (GIỮ dữ liệu)
+# XOÁ SẠCH : docker compose down -v       (MẤT toàn bộ dữ liệu - đừng dùng)
+#
+# Vì sao cổng 5434: 5432 đã có PostgreSQL cài sẵn trên Windows, 5433 đang bị
+# container của dự án khác (NgonNguKichBan) chiếm. Dùng cổng riêng để ba thứ
+# không giẫm lên nhau.
+# ==================================================================
+
+name: fakereview
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fakereview_db
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # UTF8 để lưu đúng tiếng Việt có dấu.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+
+    ports:
+      # Chỉ mở trên 127.0.0.1: máy khác trong mạng LAN không kết nối được.
+      # Vì sao cần: PostgreSQL mặc định mở ra mọi giao diện mạng; một đồ án
+      # demo không cần quyền truy cập từ máy khác, nên đóng lại cho an toàn.
+      - "127.0.0.1:${POSTGRES_PORT}:5432"
+
+    volumes:
+      # Volume có tên: dữ liệu còn nguyên sau khi tắt máy / khởi động lại.
+      - fakereview_pgdata:/var/lib/postgresql/data
+      # Script tạo bảng chỉ chạy LẦN ĐẦU khi volume còn trống.
+      # MaNguon/db.py cũng tạo lại schema (IF NOT EXISTS) nên chạy lại vẫn an toàn.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+
+    healthcheck:
+      # pg_isready kiểm tra database đã sẵn sàng nhận kết nối chưa.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+    networks:
+      - fakereview_net
+
+volumes:
+  fakereview_pgdata:
+    name: fakereview_pgdata
+
+networks:
+  fakereview_net:
+    name: fakereview_net
