@@ -2,7 +2,7 @@
 
 Phân loại review thật/giả bằng Logistic Regression (`SGDClassifier(loss="log_loss")`) trên TF-IDF. PostgreSQL là nguồn dữ liệu duy nhất; web và API chạy cùng một server tại `http://127.0.0.1:8000/`.
 
-## Triển khai nhanh cho đồng đội
+## Triển khai nhanh cho mọi người
 
 Làm đúng 6 bước dưới đây là chạy được. Thông tin kết nối luôn lấy từ `ThuMucChienKhai\.env`: database `fakereview`, cổng `5434`, container `fakereview_db`, user `postgres`.
 
