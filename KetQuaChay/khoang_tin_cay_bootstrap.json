@@ -1,0 +1,41 @@
+{
+  "seed": 2027,
+  "group_code": 1,
+  "threshold": 0.41,
+  "sample_count": 6062,
+  "iterations": 1000,
+  "metrics": {
+    "f1": {
+      "point": 0.9178,
+      "lower_95": 0.9109,
+      "upper_95": 0.9251,
+      "mean": 0.918,
+      "std": 0.0037,
+      "iterations_used": 1000
+    },
+    "accuracy": {
+      "point": 0.9167,
+      "lower_95": 0.9098,
+      "upper_95": 0.9238,
+      "mean": 0.9169,
+      "std": 0.0035,
+      "iterations_used": 1000
+    },
+    "precision": {
+      "point": 0.9047,
+      "lower_95": 0.8947,
+      "upper_95": 0.9152,
+      "mean": 0.9047,
+      "std": 0.0051,
+      "iterations_used": 1000
+    },
+    "recall": {
+      "point": 0.9313,
+      "lower_95": 0.9224,
+      "upper_95": 0.9402,
+      "mean": 0.9317,
+      "std": 0.0046,
+      "iterations_used": 1000
+    }
+  }
+}

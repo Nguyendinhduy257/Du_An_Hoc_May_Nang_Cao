@@ -1,10 +1,11 @@
 r"""
 Minh hoạ các thuật toán lõi của giáo trình bằng numpy thuần.
 
-Nội dung: GD một biến và nhiều biến, momentum, SGD/mini-batch (CLO1);
-perceptron (CLO2); MLP một tầng ẩn với lan truyền ngược và gradient check
-(CLO3). Đây là phần minh hoạ, không tham gia huấn luyện model thật. Model
-thật nằm ở train_baseline.py, dùng SGDClassifier của scikit-learn.
+Nội dung: GD một biến và nhiều biến, momentum, SGD/mini-batch, quét tốc độ học
+(CLO1); perceptron và Pocket (CLO2); MLP một tầng ẩn với lan truyền ngược,
+gradient check, ba cấu hình và đối chứng MLPClassifier (CLO3). Đây là phần
+minh hoạ, không tham gia huấn luyện model thật. Model thật nằm ở
+train_baseline.py, dùng SGDClassifier của scikit-learn.
 
 Dữ liệu sinh bằng numpy với seed cố định nên chạy lại cho cùng kết quả.
 Chạy: python MaNguon\from_scratch.py
@@ -19,7 +20,11 @@ Viết tắt dùng trong file:
     CLO  - chuẩn đầu ra môn học
 """
 
+import warnings
+
 import numpy as np
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.neural_network import MLPClassifier
 
 from config import (
     FROM_SCRATCH_LEARNING_RATE,
@@ -237,20 +242,19 @@ def gradient_check(analytic_function, weights, design, target, epsilon):
     return float(np.max(relative_error))
 
 
-def make_classification_data(sample_count, seed):
+def make_classification_data(sample_count, seed, spread=0.5):
     """
     Sinh hai cụm Gauss 2 chiều: nhãn 0 = thật, nhãn 1 = giả.
 
-    Hai cụm đặt xa nhau và độ lệch chuẩn nhỏ để dữ liệu gần tách được tuyến
-    tính, vì PLA chỉ đảm bảo hội tụ trong trường hợp đó (định lý Novikoff,
-    Ch2 phần 2). Dữ liệu thật thường chồng lấn, lúc đó phải dùng pocket hoặc
-    chấp nhận còn lỗi.
+    Với spread nhỏ hai cụm gần tách được tuyến tính, PLA hội tụ theo định lý
+    Novikoff (Ch2 phần 2). Tăng spread để tạo dữ liệu chồng lấn; khi đó PLA
+    không còn hội tụ và cần Pocket giữ lại nghiệm tốt nhất.
     """
     rng = np.random.default_rng(seed)
     per_class = sample_count // 2
 
-    real_features = rng.normal([-2.0, -2.0], 0.5, size=(per_class, 2))
-    fake_features = rng.normal([2.0, 2.0], 0.5, size=(per_class, 2))
+    real_features = rng.normal([-2.0, -2.0], spread, size=(per_class, 2))
+    fake_features = rng.normal([2.0, 2.0], spread, size=(per_class, 2))
 
     features = np.vstack([real_features, fake_features])
     target = np.concatenate([np.zeros(per_class), np.ones(per_class)])
@@ -318,6 +322,52 @@ def perceptron_accuracy(weights, features, target):
     signed_target = np.where(target > 0.0, 1.0, -1.0)
     predicted_sign = np.where(design @ weights >= 0.0, 1.0, -1.0)
     return float(np.mean(predicted_sign == signed_target))
+
+
+def perceptron_mistake_count(weights, features, target):
+    """Đếm số mẫu bị PLA phân sai với trọng số hiện tại."""
+    design = add_bias_column(features)
+    signed_target = np.where(target > 0.0, 1.0, -1.0)
+    predicted_sign = np.where(design @ weights >= 0.0, 1.0, -1.0)
+    return int(np.sum(predicted_sign != signed_target))
+
+
+def pocket_fit(features, target, learning_rate, steps, seed):
+    """
+    Pocket: gi lại trọng số có ít lỗi nhất từng xuất hiện trong lúc huấn luyện.
+
+    PLA cập nhật rồi lấy trọng số cuối cùng; trên dữ liệu chồng lấn trọng số
+    đó có thể tệ hơn một nghiệm đã gặp ở vòng trước. Sau mỗi vòng, Pocket đếm
+    lại toàn bộ tập và chỉ thay nghiệm tốt khi số lỗi giảm.
+    """
+    rng = np.random.default_rng(seed)
+    design = add_bias_column(features)
+    signed_target = np.where(target > 0.0, 1.0, -1.0)
+    weights = np.zeros(design.shape[1])
+    best_weights = weights.copy()
+    best_mistakes = perceptron_mistake_count(weights, features, target)
+    mistake_counts = []
+
+    for _ in range(steps):
+        order = rng.permutation(design.shape[0])
+        mistakes = 0
+
+        for index in order:
+            margin = signed_target[index] * (design[index] @ weights)
+            if margin <= 0.0:
+                weights = weights + learning_rate * signed_target[index] * design[index]
+                mistakes += 1
+
+        total_mistakes = perceptron_mistake_count(weights, features, target)
+        mistake_counts.append(total_mistakes)
+        if total_mistakes < best_mistakes:
+            best_mistakes = total_mistakes
+            best_weights = weights.copy()
+
+        if mistakes == 0:
+            break
+
+    return best_weights, best_mistakes, mistake_counts
 
 
 # ------------------------------------------------------------------
@@ -521,6 +571,15 @@ def main():
         print(f"    {label:<12}: loss cuối = {losses_sgd[-1]:.6f}")
         results[f"sgd_loss_batch_{batch_size}"] = round(losses_sgd[-1], 6)
 
+    # Quét tốc độ học: ít nhất bốn giá trị eta cho cùng một bài toán.
+    print("\n[5] Quét tốc độ học eta (GD full-batch, cùng số bước)")
+    for learning_rate in (0.01, 0.03, 0.1, 0.3, 0.5):
+        _, learning_losses = gradient_descent(
+            design, target, learning_rate, FROM_SCRATCH_STEPS, 1e-14
+        )
+        print(f"    eta = {learning_rate:<5}: loss cuối = {learning_losses[-1]:.6f}")
+        results[f"gd_loss_eta_{learning_rate}"] = round(learning_losses[-1], 6)
+
     # Gradient check hồi quy logistic
     class_features, class_target = make_classification_data(
         FROM_SCRATCH_SAMPLE_COUNT, FROM_SCRATCH_SEED
@@ -532,7 +591,7 @@ def main():
         logistic_gradient, logistic_weights, class_design, class_target,
         GRADIENT_CHECK_EPSILON
     )
-    print("\n[5] Gradient check hồi quy logistic")
+    print("\n[6] Gradient check hồi quy logistic")
     print(f"    sai số tương đối lớn nhất: {logistic_error:.3e}")
     print(f"    ngưỡng chấp nhận         : {GRADIENT_CHECK_TOLERANCE:.0e}")
     results["logistic_gradient_error"] = logistic_error
@@ -543,7 +602,7 @@ def main():
     mlp_error = mlp_gradient_check(
         mlp_parameters, xor_features, xor_target, GRADIENT_CHECK_EPSILON
     )
-    print("\n[6] Gradient check MLP 1 tầng ẩn (3 nút ẩn)")
+    print("\n[7] Gradient check MLP 1 tầng ẩn (3 nút ẩn)")
     print(f"    sai số tương đối lớn nhất: {mlp_error:.3e}")
     results["mlp_gradient_error"] = mlp_error
 
@@ -552,21 +611,79 @@ def main():
         class_features, class_target, 1.0, FROM_SCRATCH_STEPS, FROM_SCRATCH_SEED
     )
     perceptron_score = perceptron_accuracy(perceptron_weights, class_features, class_target)
-    print("\n[7] Perceptron (PLA) - CLO2")
+    print("\n[8] Perceptron (PLA) - CLO2")
     print(f"    số vòng cần            : {len(mistake_counts)}")
     print(f"    lỗi ở vòng cuối        : {mistake_counts[-1]}")
     print(f"    độ chính xác           : {perceptron_score:.4f}")
     results["perceptron_accuracy"] = round(perceptron_score, 4)
+
+    # Pocket trên dữ liệu chồng lấn: PLA không hội tụ, cần gi nghiệm tốt nhất.
+    overlap_features, overlap_target = make_classification_data(
+        FROM_SCRATCH_SAMPLE_COUNT, FROM_SCRATCH_SEED + 1, spread=1.6
+    )
+    pla_overlap_weights, pla_overlap_counts = perceptron_fit(
+        overlap_features, overlap_target, 1.0, FROM_SCRATCH_STEPS, FROM_SCRATCH_SEED
+    )
+    pla_overlap_mistakes = perceptron_mistake_count(
+        pla_overlap_weights, overlap_features, overlap_target
+    )
+    pocket_weights, pocket_mistakes, pocket_counts = pocket_fit(
+        overlap_features, overlap_target, 1.0, FROM_SCRATCH_STEPS, FROM_SCRATCH_SEED
+    )
+    pocket_score = perceptron_accuracy(pocket_weights, overlap_features, overlap_target)
+    print("\n[9] Pocket so với PLA trên dữ liệu chồng lấn - CLO2")
+    print(f"    PLA lỗi ở vòng cuối    : {pla_overlap_mistakes}")
+    print(f"    Pocket lỗi tốt nhất    : {pocket_mistakes}")
+    print(f"    PLA / Pocket độ đúng   : {perceptron_accuracy(pla_overlap_weights, overlap_features, overlap_target):.4f} / {pocket_score:.4f}")
+    results["pla_overlap_mistakes"] = pla_overlap_mistakes
+    results["pocket_best_mistakes"] = pocket_mistakes
+    results["pocket_accuracy"] = round(pocket_score, 4)
 
     # MLP trên XOR
     xor_parameters, xor_losses = mlp_fit(
         xor_features, xor_target, 4, 2.0, 5000, FROM_SCRATCH_SEED
     )
     xor_score = mlp_accuracy(xor_parameters, xor_features, xor_target)
-    print("\n[8] MLP trên XOR - CLO3")
+    print("\n[10] MLP trên XOR - CLO3")
     print(f"    loss cuối              : {xor_losses[-1]:.6f}")
     print(f"    độ chính xác           : {xor_score:.4f}")
     results["mlp_xor_accuracy"] = round(xor_score, 4)
+
+    # Ba cấu hình MLP trên cùng dữ liệu chồng lấn: đổi số nút ẩn và eta.
+    overlap_target_2d = overlap_target.reshape(-1, 1)
+    mlp_configs = ((2, 0.5), (8, 0.5), (4, 2.0))
+    print("\n[11] Ba cấu hình MLP tự cài (dữ liệu chồng lấn, 3000 bước)")
+    for hidden_size, mlp_learning_rate in mlp_configs:
+        config_parameters, config_losses = mlp_fit(
+            overlap_features, overlap_target_2d, hidden_size,
+            mlp_learning_rate, 3000, FROM_SCRATCH_SEED
+        )
+        config_score = mlp_accuracy(config_parameters, overlap_features, overlap_target_2d)
+        print(f"    ẩn={hidden_size}, eta={mlp_learning_rate:<4}: loss={config_losses[-1]:.6f}, độ đúng={config_score:.4f}")
+        results[f"mlp_hidden_{hidden_size}_eta_{mlp_learning_rate}_accuracy"] = round(config_score, 4)
+
+    # Đối chứng: cùng kiến trúc, activation, full-batch, không momentum. sklearn
+    # dùng momentum 0.9 mặc định nên phải tắt đi để so sánh công bằng.
+    print("\n[12] Đối chứng sklearn MLPClassifier (cùng cấu hình, không momentum)")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        for hidden_size, mlp_learning_rate in mlp_configs:
+            sklearn_mlp = MLPClassifier(
+                hidden_layer_sizes=(hidden_size,),
+                activation="logistic",
+                solver="sgd",
+                momentum=0,
+                nesterovs_momentum=False,
+                learning_rate_init=mlp_learning_rate,
+                batch_size=FROM_SCRATCH_SAMPLE_COUNT,
+                max_iter=3000,
+                tol=1e-8,
+                random_state=FROM_SCRATCH_SEED,
+            )
+            sklearn_mlp.fit(overlap_features, overlap_target)
+            sklearn_score = sklearn_mlp.score(overlap_features, overlap_target)
+            print(f"    ẩn={hidden_size}, eta={mlp_learning_rate:<4}: loss={float(sklearn_mlp.loss_):.6f}, độ đúng={sklearn_score:.4f}")
+            results[f"sklearn_mlp_hidden_{hidden_size}_eta_{mlp_learning_rate}_accuracy"] = round(sklearn_score, 4)
 
     # Tổng kết
     logistic_pass = logistic_error < GRADIENT_CHECK_TOLERANCE
