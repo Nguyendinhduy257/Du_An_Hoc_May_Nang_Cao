@@ -1,5 +1,8 @@
 # Fake Review Detection — agent notes
 
+## Working with the user
+- Requests are often ambiguous or incomplete: list the unclear points and proposed options, then wait for explicit confirmation before implementing. Re-confirm when a later answer conflicts with the original request.
+
 ## Commands (run from the repo root)
 - Set `$env:PYTHONIOENCODING='utf-8'` before Python on PowerShell; Vietnamese console output otherwise breaks.
 - Scripts are flat and use bare imports (`from config import ...`): run `python MaNGuon\<file>.py`, never `python -m MaNGuon.<file>`. `MaNGuon/config.py` is the only place paths/constants are declared — don't hardcode `..` paths.

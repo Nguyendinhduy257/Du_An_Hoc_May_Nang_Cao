@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<!--
+  Đường dẫn: Du_An_Hoc_May_Nang_Cao\Web\truc_quan.html
+  Mục đích : Trang riêng cho phần phân tích và trực quan hóa dữ liệu.
+  Input    : ../DuLieuDemo/data_meta.js (do MaNguon/export_web_data.py sinh ra)
+             + style.css (dùng chung token màu) + truc_quan.css + truc_quan.js
+  Output   : các biểu đồ và số liệu kỹ thuật, tách khỏi trang review chính.
+  Lưu ý    : script thường, không dùng type="module" để mở được bằng file://.
+-->
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trực quan hóa dữ liệu - Fake Review Detection</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="truc_quan.css">
+
+  <script>
+    (function () {
+      var theme = "light";
+      try {
+        var stored = window.localStorage.getItem("fake-review-theme");
+        if (stored === "dark" || stored === "light") {
+          theme = stored;
+        }
+      } catch (error) {
+        // Trình duyệt chặn localStorage: giữ nền sáng.
+      }
+      document.documentElement.setAttribute("data-theme", theme);
+
+      // Menu dọc mở ở lượt đầu; từ lượt sau giữ nguyên lựa chọn của người dùng.
+      var sidebar = "open";
+      try {
+        if (window.localStorage.getItem("fake-review-sidebar") === "collapsed") {
+          sidebar = "collapsed";
+        }
+      } catch (error) {
+        // Không đọc được localStorage thì vẫn mặc định mở.
+      }
+      document.documentElement.setAttribute("data-sidebar", sidebar);
+    })();
+  </script>
+</head>
+<body class="viz-page">
+
+  <!-- Menu dọc cố định bên trái, dùng chung bố cục với trang review chính. -->
+  <aside class="menu-sidebar" id="menu-wrap" aria-label="Menu chính">
+    <div class="menu-brand">
+      <span class="menu-brand-mark" aria-hidden="true">FR</span>
+      <span class="menu-brand-text">Fake Review</span>
+    </div>
+
+    <nav class="menu-panel" id="main-menu" aria-label="Menu chính">
+      <a class="menu-item" id="menu-home" href="index.html" title="Về trang chủ review">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M4 11.2 12 4l8 7.2M6.5 10v9h11v-9M10 19v-5h4v5"></path>
+        </svg>
+        <span class="menu-item-text">Về trang chủ review</span>
+      </a>
+
+      <a class="menu-item is-active" id="menu-visualize" href="truc_quan.html"
+         aria-current="page" title="Trực quan hóa dữ liệu">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M3 20h18M5 20v-6M11 20V6M17 20v-9"></path>
+        </svg>
+        <span class="menu-item-text">Trực quan hóa dữ liệu</span>
+      </a>
+
+      <div class="menu-divider" role="separator"></div>
+
+      <button type="button" class="menu-item menu-settings" id="viz-theme-toggle"
+              aria-pressed="false" title="Chuyển sang nền tối">
+        <span class="menu-item-icon" id="viz-theme-icon" aria-hidden="true">&#9790;</span>
+        <span class="menu-item-text">Thiết lập</span>
+      </button>
+    </nav>
+
+    <button type="button" class="menu-toggle" id="menu-toggle"
+            aria-label="Thu gọn menu" aria-expanded="true" aria-controls="main-menu"
+            title="Thu gọn menu">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M4 7h16M4 12h16M4 17h16"></path>
+      </svg>
+      <span class="menu-toggle-text">Thu gọn</span>
+    </button>
+  </aside>
+
+  <header class="page-header viz-header">
+    <div>
+      <p class="eyebrow">Phân tích &middot; Trực quan hóa dữ liệu</p>
+      <h1>Trực quan hóa kết quả phân tích</h1>
+      <p class="subtitle">
+        Các biểu đồ và số liệu kỹ thuật được tách riêng để trình bày theo đúng
+        nội dung của học phần. Dữ liệu lấy trực tiếp từ kết quả đã lưu, không
+        huấn luyện lại tại trình duyệt.
+      </p>
+    </div>
+  </header>
+
+  <main id="app" class="technical-body viz-body">
+    <section class="card viz-card">
+      <div class="section-heading">
+        <div>
+          <h2>Chỉ số tổng quan</h2>
+          <p class="hint">Mọi chỉ số tính tại ngưỡng đã chọn trên tập xác thực.</p>
+        </div>
+      </div>
+      <div class="kpi-grid" id="kpi-grid"></div>
+    </section>
+
+    <section class="card viz-card">
+      <div class="section-heading">
+        <div>
+          <h2>Ma trận nhầm</h2>
+          <p class="hint">Hàng là nhãn thật, cột là nhãn model dự đoán.</p>
+        </div>
+      </div>
+      <div class="confusion-grid" id="confusion-grid"></div>
+      <ul class="note-list" id="confusion-legend"></ul>
+    </section>
+
+    <section class="card viz-card">
+      <div class="section-heading">
+        <div>
+          <h2>Phân bố xác suất model gán nhãn Giả</h2>
+          <p class="hint">
+            Mỗi cột là số review rơi vào một khoảng xác suất. Hai màu là nhãn thật.
+            Đường nét đứt là ngưỡng quyết định.
+          </p>
+        </div>
+      </div>
+      <div class="chart-toolbar" id="histogram-legend"></div>
+      <div class="chart-box" id="histogram-chart"></div>
+    </section>
+
+    <section class="card viz-card">
+      <div class="section-heading">
+        <div>
+          <h2>Chọn ngưỡng trên tập xác thực</h2>
+          <p class="hint">
+            Mỗi điểm trên trục ngang là một ngưỡng thử. F1 đạt đỉnh ở ngưỡng
+            được chọn.
+          </p>
+        </div>
+      </div>
+      <div class="chart-toolbar" id="curve-legend"></div>
+      <div class="chart-box" id="curve-chart"></div>
+    </section>
+
+    <section class="card viz-card">
+      <div class="section-heading">
+        <div>
+          <h2>Độ tin cậy của xác suất</h2>
+          <p class="hint">
+            Điểm càng gần đường chéo thì xác suất càng đáng tin. Bán kính điểm
+            thể hiện số review trong khoảng.
+          </p>
+        </div>
+      </div>
+      <div class="chart-toolbar" id="reliability-legend"></div>
+      <div class="chart-box" id="reliability-chart"></div>
+      <p class="hint" id="reliability-summary"></p>
+    </section>
+  </main>
+
+  <footer class="page-footer">
+    <p id="viz-footer">Dữ liệu từ DuLieuDemo/data_meta.js.</p>
+  </footer>
+
+  <script src="../DuLieuDemo/data_meta.js"></script>
+  <script src="truc_quan.js"></script>
+</body>
+</html>

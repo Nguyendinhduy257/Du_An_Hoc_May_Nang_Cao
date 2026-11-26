@@ -32,3 +32,6 @@ SaoLuu/*
 # Đã ghi SHA256 và nguồn trong DuLieuDeHoc/README.md + SOURCE.json.
 # Giữ file CSV đã chuẩn hoá để clone về chạy ngay; bỏ file zip trùng lặp.
 DuLieuDeHoc/DuLieuTho/fake-reviews-dataset.zip
+
+# File cá nhân
+AGENTS.md

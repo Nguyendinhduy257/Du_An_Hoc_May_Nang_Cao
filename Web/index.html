@@ -1,15 +1,6 @@
 <!DOCTYPE html>
 <!--
   Đường dẫn: Du_An_Hoc_May_Nang_Cao\Web\index.html
-  Mục đích : Khung trang kiểm tra review cho đồ án Fake Review Detection.
-  Input    : data_meta.js + data_reviews.js (sinh bởi MaNguon/export_web_data.py)
-             + app.js + style.css
-  Output   : trang HTML tĩnh; mở bằng double-click để xem demo, hoặc mở qua
-             http://127.0.0.1:8000/ để dùng được nhập tay và tải file CSV.
-
-  Lưu ý kỹ thuật: các thẻ <script> bên dưới là loại "classic", KHÔNG dùng
-  type="module", vì Chrome chặn module khi mở qua giao thức file://.
-  app.js tự chèn thêm <script src="data_reviews.js"> khi cần vẽ bảng.
 -->
 <html lang="vi">
 <head>
@@ -35,34 +26,125 @@
         // Trình duyệt chặn localStorage: giữ mặc định nền sáng.
       }
       document.documentElement.setAttribute("data-theme", theme);
+
+      // Menu dọc mở ở lượt đầu; từ lượt sau giữ nguyên lựa chọn của người dùng.
+      var sidebar = "open";
+      try {
+        if (window.localStorage.getItem("fake-review-sidebar") === "collapsed") {
+          sidebar = "collapsed";
+        }
+      } catch (error) {
+        // Không đọc được localStorage thì vẫn mặc định mở.
+      }
+      document.documentElement.setAttribute("data-sidebar", sidebar);
     })();
   </script>
 </head>
 <body>
 
-  <!-- Màn hình chờ dùng hiệu ứng giọt lỏng (Gooey).
-       Hiện ngay từ đầu và do app.js tắt đi khi chạy xong, nên người xem thấy
-       hệ thống "đang xử lý" thay vì kết quả demo bật ra sẵn. -->
-  <div class="loader-screen" id="loader-screen" role="status" aria-live="polite">
-    <div class="loader-panel">
-      <div class="goo-stage" aria-hidden="true">
-        <span class="goo-blob goo-blob-1"></span>
-        <span class="goo-blob goo-blob-2"></span>
-        <span class="goo-blob goo-blob-3"></span>
-        <span class="goo-blob goo-blob-4"></span>
-        <span class="goo-blob goo-blob-5"></span>
+  <!-- Menu dọc cố định bên trái. Mặc định mở; nút thu gọn nằm giữa cột. -->
+  <aside class="menu-sidebar" id="menu-wrap" aria-label="Menu chính">
+    <div class="menu-brand">
+      <span class="menu-brand-mark" aria-hidden="true">FR</span>
+      <span class="menu-brand-text">Fake Review</span>
+    </div>
+
+    <nav class="menu-panel" id="main-menu" aria-label="Menu chính">
+      <a class="menu-item is-active" id="menu-home" href="index.html"
+         aria-current="page" title="Trang chủ review">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M4 11.2 12 4l8 7.2M6.5 10v9h11v-9M10 19v-5h4v5"></path>
+        </svg>
+        <span class="menu-item-text">Trang chủ review</span>
+      </a>
+
+      <a class="menu-item" id="menu-visualize" href="truc_quan.html"
+         title="Trực quan hóa dữ liệu">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M3 20h18M5 20v-6M11 20V6M17 20v-9"></path>
+        </svg>
+        <span class="menu-item-text">Trực quan hóa dữ liệu</span>
+      </a>
+
+      <div class="menu-divider" role="separator"></div>
+
+      <button type="button" class="menu-item menu-settings" id="menu-settings"
+              title="Đổi nền sáng/tối">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="3.2"></circle>
+          <path d="M19.4 13.9a7.8 7.8 0 0 0 0-3.8l2-1.6-2-3.4-2.4 1a7.8 7.8 0 0 0-3.3-1.9L13.4 2h-4l-.3 2.2a7.8 7.8 0 0 0-3.3 1.9l-2.4-1-2 3.4 2 1.6a7.8 7.8 0 0 0 0 3.8l-2 1.6 2 3.4 2.4-1a7.8 7.8 0 0 0 3.3 1.9l.3 2.2h4l.3-2.2a7.8 7.8 0 0 0 3.3-1.9l2.4 1 2-3.4-2-1.6Z"></path>
+        </svg>
+        <span class="menu-item-text">Thiết lập</span>
+      </button>
+    </nav>
+
+    <button type="button" class="menu-toggle" id="menu-toggle"
+            aria-label="Thu gọn menu" aria-expanded="true" aria-controls="main-menu"
+            title="Thu gọn menu">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M4 7h16M4 12h16M4 17h16"></path>
+      </svg>
+      <span class="menu-toggle-text">Thu gọn</span>
+    </button>
+  </aside>
+
+  <!-- Màn hình chờ dùng hiệu ứng giọt lỏng (Gooey). Mặc định ẩn: trang mở ra
+       trước tiên cho xem preview dữ liệu, chỉ bấm nút huấn luyện mới hiện.
+       Sau khi chạy xong không tắt ngay mà chuyển sang bảng kết quả. -->
+  <div class="loader-screen is-hidden" id="loader-screen" role="status" aria-live="polite">
+    <!-- Panel thinking và panel result nằm trong cùng một khu vực, còn toàn bộ
+         nút điều khiển nằm ở .overlay-actions bên dưới. Nhờ vậy đổi trạng thái
+         không làm xô lệch vị trí các nút. -->
+    <div class="overlay-stage">
+      <div class="loader-panel" id="loader-panel">
+        <div class="goo-stage" aria-hidden="true">
+          <span class="goo-blob goo-blob-1"></span>
+          <span class="goo-blob goo-blob-2"></span>
+          <span class="goo-blob goo-blob-3"></span>
+          <span class="goo-blob goo-blob-4"></span>
+          <span class="goo-blob goo-blob-5"></span>
+        </div>
+        <p class="loader-kicker">Học máy nâng cao &middot; Logistic Regression + TF-IDF</p>
+        <h2 class="loader-title" id="loader-title">Đang khởi động mô hình</h2>
+        <p class="loader-detail" id="loader-detail"></p>
+        <!-- Kết quả cuối cùng của từng bước đã xong. app.js chỉ thêm dòng khi
+             bước đó thật sự hoàn tất, nên không có kết quả bịa trước. -->
+        <ol class="loader-log" id="loader-log" aria-label="Kết quả từng bước"></ol>
+        <p class="loader-timer" id="loader-timer"></p>
       </div>
-      <p class="loader-kicker">Học máy nâng cao &middot; Logistic Regression + TF-IDF</p>
-      <h2 class="loader-title" id="loader-title">Đang khởi động mô hình</h2>
-      <p class="loader-detail" id="loader-detail"></p>
-      <!-- Kết quả cuối cùng của từng bước đã xong. app.js chỉ thêm dòng khi
-           bước đó thật sự hoàn tất, nên không có kết quả bịa trước. -->
-      <ol class="loader-log" id="loader-log" aria-label="Kết quả từng bước"></ol>
-      <div class="loader-track" id="loader-track" role="progressbar"
-           aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <div class="loader-fill" id="loader-fill"></div>
+
+      <!-- Hiện sau khi các bước chạy xong. Mỗi tab là một giai đoạn của luồng
+           huấn luyện; nội dung gồm bảng preview và biểu đồ thuộc giai đoạn đó. -->
+      <div class="result-panel" id="result-panel" hidden>
+        <div class="result-head">
+          <div>
+            <p class="loader-kicker">Học máy nâng cao &middot; Kết quả từng giai đoạn</p>
+            <h2 id="result-title">Quá trình xử lý đã hoàn tất</h2>
+            <p class="hint" id="result-subtitle"></p>
+          </div>
+        </div>
+        <div class="result-tabs" id="result-tabs" role="tablist"></div>
+        <div class="result-content" id="result-content" role="tabpanel"></div>
       </div>
-      <p class="loader-timer" id="loader-timer"></p>
+    </div>
+
+    <!-- Khung nút dùng chung. Trước khi xong là Huỷ, sau khi xong là cụm
+         Đóng/Chạy lại; chiều cao và vị trí không đổi. -->
+    <div class="overlay-actions" id="overlay-actions">
+      <div class="overlay-buttons">
+        <button type="button" class="loader-cancel" id="loader-cancel">
+          Huỷ quá trình
+        </button>
+        <div class="result-actions" id="result-actions" hidden>
+          <button type="button" class="primary-button" id="result-close">
+            Đóng để xem kết quả phân loại
+          </button>
+          <button type="button" class="secondary-button" id="result-rerun">
+            Chạy lại quá trình
+          </button>
+        </div>
+      </div>
+      <p class="hint overlay-note" id="result-note"></p>
     </div>
   </div>
 
@@ -89,10 +171,10 @@
       <div class="header-badges" id="header-badges"></div>
 
       <div class="header-actions">
-        <!-- Bấm để chạy lại toàn bộ quá trình xử lý và xem màn hình chờ.
-             Nhãn hiện sau lần chạy đầu, tránh người xem bấm khi đang chờ. -->
-        <button type="button" class="replay-button" id="replay-button" hidden>
-          Chạy lại quá trình
+        <!-- Nút chạy luồng huấn luyện. Trang mở ra ở chế độ xem trước, chưa
+             tự động chạy; bấm nút này mới hiện màn hình thinking. -->
+        <button type="button" class="primary-button train-button" id="train-button">
+          Chạy file huấn luyện
         </button>
 
         <!-- Công tắc sáng/tối. Nhãn ghi hành động sẽ xảy ra khi bấm;
@@ -118,6 +200,50 @@
 
   <main id="app">
 
+    <!-- 5 thẻ nhóm + số review hữu ích -->
+    <section class="card" id="summary-card" hidden>
+      <div class="section-heading">
+        <div>
+          <h2>Kết quả phân loại</h2>
+          <p class="hint" id="summary-hint"></p>
+        </div>
+        <div class="summary-actions">
+          <!-- Nút này hiện sau khi reload: bấm mới chạy delay + tăng số từ 0.
+               Luôn có mặt trong khung để việc đổi chữ/khoá nút không xô layout. -->
+          <button type="button" class="secondary-button reveal-button"
+                  id="reveal-data-button" disabled>Đã hiện dữ liệu</button>
+          <div class="useful-pill" id="useful-pill"></div>
+        </div>
+      </div>
+
+      <div class="category-grid" id="category-grid"></div>
+
+      <!-- Bảng giải thích cơ sở của từng nhóm. Vì sao đặt ngay dưới thẻ:
+           người xem phải biết nhóm nào do model, nhóm nào do luật quyết định
+           trước khi đọc con số, tránh hiểu nhầm luật là thuật toán học máy. -->
+      <div class="basis-banner">
+        <p class="basis-banner-title">Cách đọc nhãn</p>
+        <p>
+          <span class="basis-tag basis-model">MODEL</span> do mô hình Logistic
+          Regression quyết định.
+          <span class="basis-tag basis-rule">LUẬT</span> do luật đếm từ, so
+          trùng lặp hoặc số sao quyết định.
+          <span class="basis-tag basis-both">MODEL + LUẬT</span> do mô hình nói
+          "giả" và luật xác nhận "5 sao + nội dung ngắn".
+        </p>
+        <p>
+          Đây là nhãn suy luận để hiển thị, không phải ground truth. Dataset gốc
+          chỉ có CG (máy sinh) / OR (người viết), không có nhãn bot, boost hay
+          spam.
+        </p>
+      </div>
+
+      <p class="legend-note">
+        Dataset gốc chỉ có CG (máy sinh) / OR (người viết), không có nhãn bot,
+        boost hay spam. Các nhóm còn lại là luật suy luận để hiển thị.
+      </p>
+    </section>
+
     <!-- Chọn nguồn dữ liệu -->
     <section class="card source-card">
       <div class="source-tabs" role="tablist">
@@ -129,6 +255,66 @@
         </button>
       </div>
       <p class="source-note" id="source-note"></p>
+    </section>
+
+    <!-- Thẻ demo hiện sẵn nhưng bảng review chỉ mở khi bấm nút. Không tự chạy
+         mô hình: bảng đọc data_reviews.js rồi nạp dần 100 dòng một lượt. -->
+    <section class="card preview-card" id="preview-card">
+      <div class="section-heading">
+        <div>
+          <h2>Dữ liệu demo (tập test)</h2>
+          <p class="hint" id="preview-hint">
+            Review đã dùng để đánh giá mô hình. Bấm “Xem preview dữ liệu” để mở
+            bảng và lọc; bấm “Chạy file huấn luyện” để xem từng giai đoạn xử lý.
+          </p>
+        </div>
+        <div class="preview-heading-actions">
+          <span class="editor-count" id="preview-count"></span>
+          <button type="button" class="replay-button" id="preview-toggle"
+                  aria-expanded="false" aria-controls="preview-panel">
+            Xem preview dữ liệu
+          </button>
+        </div>
+      </div>
+
+      <div id="preview-panel" hidden>
+        <div class="preview-filter" id="preview-filter">
+          <div class="preview-filter-row">
+            <label class="preview-filter-label" for="preview-search">Tìm nội dung</label>
+            <input type="search" id="preview-search"
+                   placeholder="Gõ vài chữ, có hoặc không dấu đều được..."
+                   autocomplete="off">
+            <button type="button" class="page-button" id="preview-filter-reset">
+              Xoá lọc
+            </button>
+          </div>
+          <div class="preview-filter-row">
+            <span class="preview-filter-label">Lọc nhanh</span>
+            <div class="preview-filter-chips" id="preview-filter-chips"></div>
+          </div>
+          <p class="hint" id="preview-filter-count"></p>
+        </div>
+
+        <div class="table-wrap" id="preview-table-wrap">
+          <table class="result-table">
+            <thead>
+              <tr>
+                <th>#</th><th>Nội dung review</th><th>Sao</th>
+                <th>Nhãn thật</th><th>Xác suất giả</th><th>Nhóm</th>
+              </tr>
+            </thead>
+            <tbody id="preview-body"></tbody>
+          </table>
+        </div>
+        <p class="hint infinite-status" id="preview-table-status"></p>
+
+        <div class="editor-actions">
+          <button type="button" class="primary-button" id="preview-run-button">
+            Chạy file huấn luyện
+          </button>
+          <span class="hint" id="preview-status"></span>
+        </div>
+      </div>
     </section>
 
     <!-- Bảng tải file CSV -->
@@ -196,43 +382,6 @@
       </div>
     </section>
 
-    <!-- 5 thẻ nhóm + số review hữu ích -->
-    <section class="card" id="summary-card" hidden>
-      <div class="section-heading">
-        <div>
-          <h2>Kết quả phân loại</h2>
-          <p class="hint" id="summary-hint"></p>
-        </div>
-        <div class="useful-pill" id="useful-pill"></div>
-      </div>
-      <div class="category-grid" id="category-grid"></div>
-
-      <!-- Bảng giải thích cơ sở của từng nhóm. Vì sao đặt ngay dưới thẻ:
-           người xem phải biết nhóm nào do model, nhóm nào do luật quyết định
-           trước khi đọc con số, tránh hiểu nhầm luật là thuật toán học máy. -->
-      <div class="basis-banner">
-        <p class="basis-banner-title">Cách đọc nhãn</p>
-        <p>
-          <span class="basis-tag basis-model">MODEL</span> do mô hình Logistic
-          Regression quyết định.
-          <span class="basis-tag basis-rule">LUẬT</span> do luật đếm từ, so
-          trùng lặp hoặc số sao quyết định.
-          <span class="basis-tag basis-both">MODEL + LUẬT</span> do mô hình nói
-          "giả" và luật xác nhận "5 sao + nội dung ngắn".
-        </p>
-        <p>
-          Đây là nhãn suy luận để hiển thị, không phải ground truth. Dataset gốc
-          chỉ có CG (máy sinh) / OR (người viết), không có nhãn bot, boost hay
-          spam.
-        </p>
-      </div>
-
-      <p class="legend-note">
-        Dataset gốc chỉ có CG (máy sinh) / OR (người viết), không có nhãn bot,
-        boost hay spam. Các nhóm còn lại là luật suy luận để hiển thị.
-      </p>
-    </section>
-
     <!-- Bảng phân bố 5 sao -->
     <section class="card" id="star-card" hidden>
       <div class="section-heading">
@@ -258,6 +407,12 @@
       </div>
 
       <div class="filter-chips" id="filter-chips"></div>
+      <div class="filter-tools">
+        <input type="search" id="table-search" aria-label="Tìm nội dung review"
+               placeholder="Tìm nội dung review (gõ không dấu cũng được)..."
+               autocomplete="off">
+      </div>
+      <div class="active-filters" id="active-filters"></div>
       <p class="hint" id="table-count"></p>
 
       <div class="table-wrap">
@@ -304,63 +459,6 @@
 
       <div class="predict-result" id="predict-result"></div>
     </section>
-
-    <!-- Số liệu kỹ thuật, mặc định thu gọn -->
-    <details class="card technical" id="technical-section" hidden>
-      <summary>Số liệu kỹ thuật (dành cho báo cáo)</summary>
-
-      <div class="technical-body">
-        <section class="report-block">
-          <h2>Chỉ số tổng quan</h2>
-          <p class="hint">
-            Mọi chỉ số tính tại ngưỡng quyết định đã chọn trên tập val.
-            F1 là chỉ số chính vì nó cân bằng Precision và Recall.
-          </p>
-          <div class="kpi-grid" id="kpi-grid"></div>
-        </section>
-
-        <section class="report-block">
-          <h2>Confusion matrix</h2>
-          <p class="hint">
-            Hàng là nhãn thật, cột là nhãn model dự đoán.
-          </p>
-          <div class="confusion-grid" id="confusion-grid"></div>
-          <ul class="note-list" id="confusion-legend"></ul>
-        </section>
-
-        <section class="report-block">
-          <h2>Phân bố xác suất model gán nhãn Giả</h2>
-          <p class="hint">
-            Mỗi cột là số review rơi vào một khoảng xác suất. Hai màu là nhãn thật.
-            Đường nét đứt là ngưỡng quyết định.
-          </p>
-          <div class="chart-toolbar" id="histogram-legend"></div>
-          <div class="chart-box" id="histogram-chart"></div>
-        </section>
-
-        <section class="report-block">
-          <h2>Vì sao chọn ngưỡng đó - quét trên tập val</h2>
-          <p class="hint">
-            Mỗi điểm trên trục ngang là một ngưỡng thử. F1 đạt đỉnh ở ngưỡng
-            được chọn.
-          </p>
-          <div class="chart-toolbar" id="curve-legend"></div>
-          <div class="chart-box" id="curve-chart"></div>
-        </section>
-
-        <section class="report-block">
-          <h2>Độ tin cậy của xác suất (hiệu chuẩn)</h2>
-          <p class="hint">
-            Nếu model nói "70% là giả" thì thực tế phải có khoảng 70% review
-            trong nhóm đó là giả. Điểm càng gần đường chéo thì xác suất càng
-            đáng tin. Bán kính điểm thể hiện số review trong khoảng.
-          </p>
-          <div class="chart-toolbar" id="reliability-legend"></div>
-          <div class="chart-box" id="reliability-chart"></div>
-          <p class="hint" id="reliability-summary"></p>
-        </section>
-      </div>
-    </details>
 
   </main>
 

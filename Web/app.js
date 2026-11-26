@@ -104,9 +104,11 @@ const state = {
   rows: [],              // dữ liệu đang hiển thị
   summary: null,         // số lượng theo nhóm và theo sao
   meta: null,            // thông tin chung của nguồn đang xem
-  technical: null,       // số liệu biểu đồ đã vẽ, để vẽ lại khi đổi sáng/tối
   hasTrueLabel: false,   // chỉ dữ liệu demo mới có nhãn thật
   filter: "genuine",     // mặc định chỉ giữ review hữu ích
+  star: "all",           // "all" hoặc "1".."5", gom theo Math.round(rating)
+  query: "",             // tìm nội dung review, chuẩn hoá không dấu
+  flag: null,            // lọc theo một cờ trong review.flags
   currentPage: 1,
   pageSize: 25,
 
@@ -122,6 +124,21 @@ const state = {
     page: 1,
     pageSize: 12
   }
+};
+
+// Reload mở trang ở trạng thái chờ hiện số: 5 thẻ nhóm và thanh phân bố 5 sao
+// đứng yên ở 0. Chỉ khi bấm "Hiện lại dữ liệu" mới chạy delay + tăng số.
+let revealPending = false;
+
+// Trạng thái riêng của bảng demo: mở/đóng, toàn bộ review và bộ lọc. Tách khỏi
+// state để không bị applyPayload() đặt lại mỗi lần chạy luồng huấn luyện.
+const demoPreview = {
+  open: false,
+  reviews: [],
+  query: "",
+  star: "all",
+  label: "all",
+  category: "all"
 };
 
 /* ============================================================
@@ -166,14 +183,6 @@ function storeTheme(theme) {
   }
 }
 
-function redrawCharts() {
-  // Biểu đồ SVG đã vẽ xong thì đổi token CSS không tự đổi màu hình, nên phải
-  // vẽ lại từ số liệu đã lưu.
-  if (state.technical) {
-    renderTechnical(state.technical.data, state.technical.meta);
-  }
-}
-
 function applyTheme(theme) {
   const isDark = theme === "dark";
   document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
@@ -194,8 +203,12 @@ function applyTheme(theme) {
   if (label) {
     label.textContent = isDark ? "Nền sáng" : "Nền tối";
   }
+}
 
-  redrawCharts();
+function switchTheme() {
+  const next = currentTheme() === "dark" ? "light" : "dark";
+  storeTheme(next);
+  applyTheme(next);
 }
 
 function initTheme() {
@@ -208,11 +221,62 @@ function initTheme() {
     return;
   }
 
+  button.addEventListener("click", switchTheme);
+}
+
+/* ============================================================
+   Menu dọc bên trái
+   ============================================================ */
+
+const SIDEBAR_STORAGE_KEY = "fake-review-sidebar";
+
+function isSidebarCollapsed() {
+  return document.documentElement.getAttribute("data-sidebar") === "collapsed";
+}
+
+function syncSidebarToggle() {
+  const button = document.getElementById("menu-toggle");
+  if (!button) {
+    return;
+  }
+  const collapsed = isSidebarCollapsed();
+  const label = collapsed ? "Mở menu" : "Thu gọn menu";
+  button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  button.setAttribute("aria-label", label);
+  button.title = label;
+
+  const text = button.querySelector(".menu-toggle-text");
+  if (text) {
+    text.textContent = collapsed ? "Mở" : "Thu gọn";
+  }
+}
+
+function storeSidebarState(collapsed) {
+  try {
+    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, collapsed ? "collapsed" : "open");
+  } catch {
+    return;
+  }
+}
+
+function initMenu() {
+  const button = document.getElementById("menu-toggle");
+  const settings = document.getElementById("menu-settings");
+  if (!button) {
+    return;
+  }
+
+  syncSidebarToggle();
   button.addEventListener("click", function () {
-    const next = currentTheme() === "dark" ? "light" : "dark";
-    storeTheme(next);
-    applyTheme(next);
+    const collapsed = !isSidebarCollapsed();
+    document.documentElement.setAttribute("data-sidebar", collapsed ? "collapsed" : "open");
+    storeSidebarState(collapsed);
+    syncSidebarToggle();
   });
+
+  if (settings) {
+    settings.addEventListener("click", switchTheme);
+  }
 }
 
 /* ============================================================
@@ -235,17 +299,27 @@ const UPLOAD_RESULT_HOLD_MS = 1400;
 // còn vẽ được thanh tiến độ giữa các lô.
 const DEMO_AGGREGATE_CHUNK = 500;
 
+// Mỗi lượt cuộn tới đáy khung thì nạp thêm 100 dòng, đủ nhẹ để trình duyệt vẫn
+// mượt khi bảng có hơn 6000 review.
+const INFINITE_PAGE_SIZE = 100;
+
+// Tín hiệu nội bộ để dừng luồng thinking khi bấm Huỷ. Dùng object riêng thay vì
+// chuỗi để không nhầm với lỗi thật nào đó trong quá trình xử lý.
+const CANCEL_SENTINEL = { cancelled: true };
+
 const loaderState = {
   screen: null,
   title: null,
   detail: null,
   log: null,
-  track: null,
-  fill: null,
   timer: null,
   startedAt: 0,
   timerId: 0,
-  limitSeconds: 0
+  limitSeconds: 0,
+  cancelled: false,
+  cardsVisible: false,
+  // Lưu kết quả từng bước để sau khi chạy xong dựng bảng chi tiết.
+  steps: []
 };
 
 function loaderPart(key, id) {
@@ -255,9 +329,489 @@ function loaderPart(key, id) {
   return loaderState[key];
 }
 
+/* ============================================================
+   loading_skeleton + đếm tăng tốc cho ô số
+   ============================================================ */
+
+// Chỉ các nút chứa số mới nằm ở đây. Tiêu đề, mô tả, chữ "review" hay dấu "%"
+// đều nằm ngoài danh sách nên không bị làm mờ trong lúc thinking.
+const SKELETON_TARGETS = [
+  { key: "preview", selector: "#preview-count .preview-count-number" },
+  { key: "useful", selector: ".useful-pill-value" },
+  { key: "category", selector: ".category-count" },
+  { key: "percent", selector: ".category-percent" },
+  { key: "star", selector: ".star-meter-count" }
+];
+
+const NUMBER_RUSH_MS = 950;
+const NUMBER_RUSH_STAGGER_MS = 55;
+
+function forEachSkeletonTarget(callback) {
+  for (let t = 0; t < SKELETON_TARGETS.length; t++) {
+    const target = SKELETON_TARGETS[t];
+    const nodes = document.querySelectorAll(target.selector);
+    for (let i = 0; i < nodes.length; i++) {
+      callback(nodes[i], target.key + "-" + i);
+    }
+  }
+}
+
+// Lấy số đang hiển thị trước khi bật skeleton. Nếu số đó đã bằng số cuối (ví
+// dụ bấm chạy lại) thì deriveSpeedStart() sẽ tạo một mốc thấp hơn để vẫn có
+// đoạn tăng tốc nhìn được.
+function captureNumberStarts() {
+  const starts = {};
+  forEachSkeletonTarget(function (element, key) {
+    starts[key] = element.textContent.trim();
+  });
+  return starts;
+}
+
+// Tách một chuỗi thành phần chữ + phần số + phần sau số. Ví dụ "6.062 review"
+// thành before="", digits="6062", mask="\0.\0\0\0", after=" review".
+function numericParts(text) {
+  const value = String(text === undefined || text === null ? "" : text);
+  const match = value.match(/\d[\d.,]*/);
+  if (!match) {
+    return null;
+  }
+  const numberText = match[0];
+  return {
+    before: value.slice(0, match.index),
+    after: value.slice(match.index + numberText.length),
+    digits: numberText.replace(/\D/g, ""),
+    mask: numberText.replace(/\d/g, "\u0000")
+  };
+}
+
+function renderWithDigits(parts, digits) {
+  let cursor = 0;
+  const number = parts.mask.replace(/\u0000/g, function () {
+    return digits[cursor++] || "0";
+  });
+  return parts.before + number + parts.after;
+}
+
+// Tạo điểm xuất phát gần số cuối: giữ nguyên phần đầu, chỉ hạ 2 chữ số cuối
+// (hoặc 3 nếu 2 chữ số cuối toàn số 0). Đây là mốc để phần đuôi tăng tốc.
+function deriveSpeedStart(finalText) {
+  const parts = numericParts(finalText);
+  if (!parts || !parts.digits) {
+    return finalText;
+  }
+
+  const digits = parts.digits;
+  if (digits.length <= 1) {
+    return renderWithDigits(parts, "0");
+  }
+
+  let suffixLength = Math.min(2, digits.length);
+  let prefixLength = digits.length - suffixLength;
+  let suffixValue = parseInt(digits.slice(prefixLength), 10);
+  if (suffixValue <= 1 && digits.length > suffixLength) {
+    suffixLength = Math.min(3, digits.length);
+    prefixLength = digits.length - suffixLength;
+    suffixValue = parseInt(digits.slice(prefixLength), 10);
+  }
+  if (!Number.isFinite(suffixValue) || suffixValue <= 1) {
+    return renderWithDigits(parts, "0".repeat(digits.length));
+  }
+
+  const drop = Math.max(1, Math.floor(suffixValue * 0.25));
+  const startSuffix = Math.max(0, suffixValue - drop);
+  const startDigits =
+    digits.slice(0, prefixLength) + String(startSuffix).padStart(suffixLength, "0");
+  return renderWithDigits(parts, startDigits);
+}
+
+// Hàm dùng lại cho mọi luồng có waiting: bật/tắt skeleton chỉ trên ô số.
+function loading_skeleton(active, options) {
+  const settings = options || {};
+  const starts = settings.starts || {};
+
+  forEachSkeletonTarget(function (element, key) {
+    if (active) {
+      const finalText = element.textContent.trim();
+      if (!finalText) {
+        return;
+      }
+      const captured = starts[key];
+      const fromText = captured && captured !== finalText
+        ? captured
+        : deriveSpeedStart(finalText);
+      element.dataset.skeletonFrom = fromText;
+      element.dataset.skeletonFinal = finalText;
+      element.classList.add("is-loading-skeleton");
+      element.setAttribute("aria-busy", "true");
+      return;
+    }
+
+    element.classList.remove("is-loading-skeleton");
+    element.removeAttribute("aria-busy");
+    delete element.dataset.skeletonFrom;
+    delete element.dataset.skeletonFinal;
+  });
+}
+
+// Đọc kế hoạch trước khi applyPayload() dựng lại các ô số: các nút cũ sẽ bị
+// thay thế, nên phải mang theo mốc bắt đầu theo từng key.
+function collectSkeletonRushPlan() {
+  const plan = {};
+  forEachSkeletonTarget(function (element, key) {
+    if (element.dataset.skeletonFrom) {
+      plan[key] = {
+        from: element.dataset.skeletonFrom,
+        final: element.dataset.skeletonFinal || element.textContent.trim()
+      };
+    }
+  });
+  return plan;
+}
+
+// Chỉ animate thanh progress bên trong 5 thẻ nhóm (Hữu ích, Nghi giả, Nghi bot,
+// Quá ngắn, Trùng lặp). Các ô số khác như "review" hay 5 sao không có thanh riêng.
+function reportRushProgress(element, value) {
+  const card = element.closest ? element.closest(".category-card") : null;
+  if (!card) {
+    return;
+  }
+  const fill = card.querySelector(".category-bar-fill");
+  if (!fill) {
+    return;
+  }
+  const finalWidth = parseFloat(fill.dataset.finalWidth || fill.style.width || "0");
+  if (!Number.isFinite(finalWidth)) {
+    return;
+  }
+  const clamped = Math.max(0, Math.min(1, value));
+  // Mỗi thẻ có 2 ô số (số lượng + %) cùng đẩy một thanh. Chỉ nhận giá trị lớn
+  // hơn mốc cũ để thanh không tụt lại khi một ô chạy xong trước ô kia.
+  const previous = parseFloat(fill.dataset.rushProgress || "0");
+  const next = Number.isFinite(previous) ? Math.max(previous, clamped) : clamped;
+  fill.dataset.rushProgress = String(next);
+  fill.style.width = (finalWidth * next).toFixed(2) + "%";
+}
+
+// Chỉ animate phần chữ số khác nhau. 3030 -> 3040 có prefix "30" nên chỉ chạy
+// "30" -> "40"; 0 -> 3040 không có prefix chung nên chạy cả bốn chữ số.
+function animateNumberRush(element, fromText, finalText, delay) {
+  if (!element) {
+    return;
+  }
+
+  const target = numericParts(finalText);
+  const source = numericParts(fromText);
+  if (!target || !source || !target.digits) {
+    element.textContent = finalText;
+    return;
+  }
+
+  if (element.rushFrameId) {
+    window.cancelAnimationFrame(element.rushFrameId);
+    element.rushFrameId = 0;
+  }
+
+  const length = target.digits.length;
+  const fromDigits = source.digits.slice(-length).padStart(length, "0");
+  const toDigits = target.digits;
+  let common = 0;
+  while (common < length && fromDigits[common] === toDigits[common]) {
+    common++;
+  }
+
+  const prefix = toDigits.slice(0, common);
+  const suffixLength = length - common;
+  const fromValue = suffixLength ? parseInt(fromDigits.slice(common), 10) : 0;
+  const toValue = suffixLength ? parseInt(toDigits.slice(common), 10) : 0;
+
+  function paint(digits) {
+    element.textContent = renderWithDigits(target, digits);
+  }
+
+  const reduceMotion = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduceMotion || suffixLength === 0 || !Number.isFinite(fromValue) ||
+      !Number.isFinite(toValue) || fromValue === toValue) {
+    paint(toDigits);
+    // Vẫn đưa thanh của 5 thẻ nhóm về mốc cuối: nếu không, lúc reload đặt
+    // width = 0% ở trên sẽ bị kẹt lại khi người xem tắt hiệu ứng chuyển động.
+    reportRushProgress(element, 1);
+    return;
+  }
+
+  element.classList.add("is-number-rushing");
+  const startAt = performance.now() + (delay || 0);
+
+  function frame(now) {
+    if (now < startAt) {
+      element.rushFrameId = window.requestAnimationFrame(frame);
+      return;
+    }
+
+    const elapsed = now - startAt;
+    const time = Math.min(1, elapsed / NUMBER_RUSH_MS);
+    // Gia tốc kiểu ô tô: đầu chậm, cuối nhanh dần tới số đích.
+    const eased = time * time;
+    const value = Math.round(fromValue + (toValue - fromValue) * eased);
+    paint(prefix + String(value).padStart(suffixLength, "0"));
+    reportRushProgress(element, eased);
+
+    if (time < 1) {
+      element.rushFrameId = window.requestAnimationFrame(frame);
+      return;
+    }
+
+    element.rushFrameId = 0;
+    reportRushProgress(element, 1);
+    paint(toDigits);
+    window.setTimeout(function () {
+      if (element.rushFrameId === 0) {
+        element.classList.remove("is-number-rushing");
+        reportRushProgress(element, 1);
+      }
+    }, 260);
+  }
+
+  element.rushFrameId = window.requestAnimationFrame(frame);
+}
+
+// Nhịp xuất hiện khi reload: thẻ kết quả phân loại hiện trước (0ms); 5 thẻ nhóm
+// lần lượt 0.15 / 0.25 / 0.3 / 0.375 / 0.45s; các thẻ mẹ còn lại nằm trong 0.75-0.85s.
+const CARD_ENTER_MS = 420;
+const CATEGORY_DELAY_MS = {
+  genuine: 150,
+  suspected_fake: 250,
+  suspected_bot_boost: 350,
+  low_content: 450,
+  spam_duplicate: 550
+};
+const OTHER_CARD_DELAY_START_MS = 750;
+const OTHER_CARD_DELAY_STEP_MS = 50;
+const OTHER_CARD_DELAY_MAX_MS = 850;
+
+function reducedMotionEnabled() {
+  return Boolean(window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+function entranceDelayFor(element, otherCards) {
+  if (element.classList.contains("category-card")) {
+    const configured = CATEGORY_DELAY_MS[element.dataset.category];
+    return typeof configured === "number" ? configured : 150;
+  }
+  if (element.id === "summary-card") {
+    return 0;
+  }
+  return Math.min(OTHER_CARD_DELAY_MAX_MS,
+    OTHER_CARD_DELAY_START_MS + otherCards.indexOf(element) * OTHER_CARD_DELAY_STEP_MS);
+}
+
+// Dựng hiệu ứng xuất hiện lần lượt cho các thẻ đang hiện, kể cả 5 thẻ nhóm bên
+// trong thẻ kết quả. Thẻ đã chạy rồi (dataset.entered) không chạy lại lần hai.
+function playCardEntrance() {
+  if (reducedMotionEnabled()) {
+    return;
+  }
+  const parentCards = Array.prototype.slice.call(
+    document.querySelectorAll("main > .card")
+  );
+  const otherCards = parentCards.filter(function (card) {
+    return card.id !== "summary-card";
+  });
+  const categoryCards = Array.prototype.slice.call(
+    document.querySelectorAll("main .category-card")
+  );
+  const elements = parentCards.concat(categoryCards);
+
+  for (let i = 0; i < elements.length; i++) {
+    const element = elements[i];
+    if (element.dataset.entered === "1" || element.closest("[hidden]")) {
+      continue;
+    }
+    const delay = entranceDelayFor(element, otherCards);
+    element.dataset.entered = "1";
+    element.style.animationDelay = delay + "ms";
+    element.classList.add("is-entering");
+
+    let finished = false;
+    let fallbackId = 0;
+    function onEnd(event) {
+      if (event.target !== element || event.animationName !== "card-enter") {
+        return;
+      }
+      finish();
+    }
+    function finish() {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      element.removeEventListener("animationend", onEnd);
+      window.clearTimeout(fallbackId);
+      element.classList.remove("is-entering");
+      element.style.removeProperty("animation-delay");
+    }
+    element.addEventListener("animationend", onEnd);
+    // Phòng khi animation không chạy (thẻ bị ẩn ngay sau đó): vẫn dọn class.
+    fallbackId = window.setTimeout(finish, delay + CARD_ENTER_MS + 200);
+  }
+}
+
+function applyRushPlan(plan, options) {
+  const settings = options || {};
+  const waitForEntrance = settings.waitForEntrance === true && !reducedMotionEnabled();
+  let order = 0;
+  forEachSkeletonTarget(function (element, key) {
+    const entry = plan[key];
+    if (!entry) {
+      return;
+    }
+
+    let started = false;
+    function start() {
+      if (started) {
+        return;
+      }
+      started = true;
+      // Đặt mốc bắt đầu trước, không gán số đích ở đây: gán đích rồi mới gọi
+      // animateNumberRush() sẽ có một khung hình nhảy lên đích rụt về 0.
+      if (element.textContent.trim() !== entry.from) {
+        element.textContent = entry.from;
+      }
+      animateNumberRush(element, entry.from, entry.final, order * NUMBER_RUSH_STAGGER_MS);
+    }
+
+    // Khi reload, chỉ bật nhảy múa sau khi thẻ chứa ô số đó hiện xong (opacity 1).
+    // Với số trong 5 nhóm thì đợi chính thẻ nhóm, không đợi thẻ mẹ bao ngoài.
+    const card = waitForEntrance && element.closest
+      ? (element.closest(".category-card") || element.closest(".card"))
+      : null;
+    if (card && card.classList.contains("is-entering")) {
+      let cleanup = null;
+      function onEnd(event) {
+        if (event.target !== card || event.animationName !== "card-enter") {
+          return;
+        }
+        if (cleanup) {
+          cleanup();
+        }
+        start();
+      }
+      card.addEventListener("animationend", onEnd);
+      const timeoutId = window.setTimeout(function () {
+        if (cleanup) {
+          cleanup();
+        }
+        start();
+      }, OTHER_CARD_DELAY_MAX_MS + CARD_ENTER_MS + 500);
+      cleanup = function () {
+        card.removeEventListener("animationend", onEnd);
+        window.clearTimeout(timeoutId);
+      };
+    } else {
+      start();
+    }
+    order++;
+  });
+}
+
+/* ============================================================
+   Hiện lại dữ liệu cũ sau khi reload
+   ============================================================ */
+
+// Mốc 0 luôn là một chữ số, giữ lại phần chữ quanh số: "6.062" -> "0",
+// "12.3%" -> "0%". Không đệm 0000 nên trang load nhìn gọn và đúng ý.
+function singleZeroText(finalText) {
+  const parts = numericParts(finalText);
+  if (!parts || !parts.digits) {
+    return finalText;
+  }
+  return parts.before + "0" + parts.after;
+}
+
+function setRevealButtonState(pending) {
+  const button = document.getElementById("reveal-data-button");
+  if (!button) {
+    return;
+  }
+  button.disabled = !pending;
+  button.textContent = pending ? "Hiện lại dữ liệu" : "Đã hiện dữ liệu";
+}
+
+// Reload chỉ nạp dữ liệu và dựng bảng ở dạng 0. Không playCardEntrance(), không
+// applyRushPlan(): mọi nhịp delay được dành cho lúc bấm nút hiện lại.
+function preparePendingReveal() {
+  const demo = state.demoData;
+  if (!demo) {
+    return;
+  }
+  revealPending = true;
+  applyPayload(demo, "demo");
+  setPayloadVisibility(true);
+  setRevealButtonState(true);
+}
+
+// Nút "Hiện lại dữ liệu": chạy đúng nhịp cũ – thẻ hiện theo delay riêng, số đợi
+// thẻ của nó hiện xong rồi tăng, thanh 5 thẻ nhóm ăn theo tiến độ đó.
+function revealPendingData() {
+  if (!revealPending) {
+    return;
+  }
+  revealPending = false;
+  setRevealButtonState(false);
+
+  const plan = {};
+  forEachSkeletonTarget(function (element, key) {
+    const finalText = element.dataset.finalText || "";
+    if (!finalText) {
+      return;
+    }
+    plan[key] = { from: singleZeroText(finalText), final: finalText };
+  });
+
+  playCardEntrance();
+  applyRushPlan(plan, { waitForEntrance: true });
+  revealStarMeters();
+}
+
+// Thanh phân bố 5 sao có sẵn transition width. Chỉ cần đẩy về mốc đích sau khi
+// thẻ chứa nó hiện xong, cộng thêm một nhịp nhỏ theo từng cột để không đồng loạt.
+function revealStarMeters() {
+  const starCard = document.getElementById("star-card");
+  const cardDelay = starCard
+    ? parseFloat(starCard.style.animationDelay || "0")
+    : 0;
+  const baseDelay = Number.isFinite(cardDelay) ? cardDelay : 0;
+  const fills = document.querySelectorAll(".star-meter-fill[data-final-width]");
+  for (let i = 0; i < fills.length; i++) {
+    const fill = fills[i];
+    fill.style.transitionDelay = (baseDelay + (i % 10) * 35) + "ms";
+    fill.style.width = fill.dataset.finalWidth;
+  }
+}
+
+// pause() vừa là nhịp nghỉ giữa các bước, vừa là điểm dừng khi bấm Huỷ. Cứ
+// khoảng 50ms lại kiểm tra cờ, nên luồng dừng gần như ngay lập tức.
 function pause(milliseconds) {
-  return new Promise(function (resolve) {
-    window.setTimeout(resolve, milliseconds);
+  return new Promise(function (resolve, reject) {
+    if (loaderState.cancelled) {
+      reject(CANCEL_SENTINEL);
+      return;
+    }
+    const startedAt = Date.now();
+    function tick() {
+      if (loaderState.cancelled) {
+        reject(CANCEL_SENTINEL);
+        return;
+      }
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= milliseconds) {
+        resolve();
+        return;
+      }
+      window.setTimeout(tick, Math.min(50, milliseconds - elapsed));
+    }
+    window.setTimeout(tick, Math.min(50, milliseconds));
   });
 }
 
@@ -277,6 +831,7 @@ function resetLoaderLog() {
   if (list) {
     list.replaceChildren();
   }
+  loaderState.steps = [];
 }
 
 // Mỗi dòng là kết quả CUỐI CÙNG của một bước đã xong. Chỉ gọi sau khi bước đó
@@ -309,6 +864,8 @@ function completeLoaderStep(step, result) {
   item.appendChild(body);
   list.appendChild(item);
   list.scrollTop = list.scrollHeight;
+
+  loaderState.steps.push({ name: step, result: result });
 }
 
 // Tóm tắt 5 nhóm trên một dòng, dùng chung cho demo và file tải lên.
@@ -343,26 +900,6 @@ function loaderProbabilityRange(rows) {
   return percentText(minimum) + "–" + percentText(maximum);
 }
 
-// null = chưa biết tiến độ, cho thanh chạy qua lại thay vì bịa phần trăm.
-function setLoaderProgress(percent) {
-  const track = loaderPart("track", "loader-track");
-  const fill = loaderPart("fill", "loader-fill");
-  if (!track || !fill) {
-    return;
-  }
-
-  if (percent === null) {
-    track.classList.add("is-indeterminate");
-    track.removeAttribute("aria-valuenow");
-    return;
-  }
-
-  track.classList.remove("is-indeterminate");
-  const clamped = Math.max(0, Math.min(100, percent));
-  fill.style.width = clamped + "%";
-  track.setAttribute("aria-valuenow", String(Math.round(clamped)));
-}
-
 function renderLoaderTimer() {
   const timer = loaderPart("timer", "loader-timer");
   if (!timer) {
@@ -386,10 +923,43 @@ function showLoader(title, detail, options) {
   }
 
   screen.classList.remove("is-hidden");
+  screen.classList.remove("is-result");
+  const resultPanel = document.getElementById("result-panel");
+  if (resultPanel) {
+    resultPanel.hidden = true;
+  }
+  // Sau lần trước, nút đóng result panel đã ẩn khối thinking. Phải hiện lại
+  // khi bấm "Chạy lại", nếu không lớp phủ sẽ trống.
+  const thinking = document.getElementById("loader-panel");
+  if (thinking) {
+    thinking.hidden = false;
+  }
+  // Khung nút chung: thinking chỉ hiện Huỷ, result chỉ hiện Đóng/Chạy lại.
+  const cancelButton = document.getElementById("loader-cancel");
+  if (cancelButton) {
+    cancelButton.hidden = false;
+  }
+  const resultActions = document.getElementById("result-actions");
+  if (resultActions) {
+    resultActions.hidden = true;
+  }
+  const resultNote = document.getElementById("result-note");
+  if (resultNote) {
+    resultNote.textContent = "";
+  }
+  // Chạy một luồng mới thì trạng thái chờ hiện số ở lần reload trước không còn
+  // nữa: số sẽ do luồng chạy cập nhật, nút "Hiện lại dữ liệu" cũng vô hiệu hoá.
+  revealPending = false;
+  setRevealButtonState(false);
+
+  // Mỗi lần chạy mới (kể cả luồng upload) bắt đầu với cờ huỷ sạch. Nhớ luôn
+  // trạng thái các thẻ số để nút Huỷ đưa trang về đúng chỗ cũ.
+  loaderState.cancelled = false;
+  const summaryCard = document.getElementById("summary-card");
+  loaderState.cardsVisible = Boolean(summaryCard && !summaryCard.hidden);
   document.body.classList.add("is-processing");
   resetLoaderLog();
   setLoaderText(title, detail);
-  setLoaderProgress(typeof settings.progress === "number" ? settings.progress : null);
 
   loaderState.limitSeconds = settings.limitSeconds || 0;
   loaderState.startedAt = Date.now();
@@ -403,9 +973,16 @@ function hideLoader() {
   if (!screen) {
     return;
   }
+  // Đảm bảo không ô số nào bị kẹt ở trạng thái skeleton nếu luồng bị ngắt.
+  loading_skeleton(false);
   window.clearInterval(loaderState.timerId);
   loaderState.timerId = 0;
   screen.classList.add("is-hidden");
+  screen.classList.remove("is-result");
+  const resultPanel = document.getElementById("result-panel");
+  if (resultPanel) {
+    resultPanel.hidden = true;
+  }
   document.body.classList.remove("is-processing");
   const timer = loaderPart("timer", "loader-timer");
   if (timer) {
@@ -416,11 +993,15 @@ function hideLoader() {
 // Đếm lại nhóm/số sao ngay trong trình duyệt. Đây là việc thật, dùng để vừa
 // hiện tiến độ vừa đối chiếu với con số Python đã xuất trong data_meta.js.
 function aggregateDemoReviews(reviews, onProgress) {
-  return new Promise(function (resolve) {
+  return new Promise(function (resolve, reject) {
     const totals = { total: 0, useful: 0, categories: {}, stars: {} };
     let index = 0;
 
     function step() {
+      if (loaderState.cancelled) {
+        reject(CANCEL_SENTINEL);
+        return;
+      }
       const end = Math.min(index + DEMO_AGGREGATE_CHUNK, reviews.length);
       for (; index < end; index++) {
         const review = reviews[index];
@@ -437,7 +1018,9 @@ function aggregateDemoReviews(reviews, onProgress) {
         }
       }
 
-      onProgress(reviews.length > 0 ? index / reviews.length : 1);
+      if (onProgress) {
+        onProgress(reviews.length > 0 ? index / reviews.length : 1);
+      }
 
       if (index < reviews.length) {
         // Nhường một nhịp cho trình duyệt vẽ thanh tiến độ.
@@ -470,30 +1053,71 @@ function demoSummaryMatches(aggregate, summary) {
   return true;
 }
 
-// Chạy tuần tự: khởi động -> nạp review -> đếm -> áp ngưỡng -> dựng báo cáo.
-// Toàn bộ nằm dưới lớp phủ, nên người xem thấy "đang xử lý" chứ không thấy
-// kết quả demo bật ra sẵn.
+// Chạy tuần tự: khởi động -> nạp dữ liệu -> trích đặc trưng -> dự đoán ->
+// đánh giá -> tổng hợp. Khác bản cũ: không tự chạy lúc mở trang, và khi xong
+// giữ lại lớp phủ để người xem mở từng giai đoạn bằng bảng và biểu đồ.
+// Bọc luồng thật: nút Huỷ chỉ cần ném tín hiệu CANCEL_SENTINEL, còn lỗi thật
+// vẫn nổi lên bình thường để không che giấu sự cố.
 async function runProcessingSequence() {
+  if (document.body.classList.contains("is-processing")) {
+    return;
+  }
+  try {
+    await runProcessingFlow();
+  } catch (error) {
+    if (error !== CANCEL_SENTINEL) {
+      throw error;
+    }
+  }
+}
+
+async function runProcessingFlow() {
   const demo = state.demoData;
+  if (!demo) {
+    return;
+  }
+
   const summary = demo.summary;
-  const threshold = demo.meta.threshold;
-  const replayButton = document.getElementById("replay-button");
+  const meta = demo.meta;
+  const technical = demo.technical;
+  const threshold = meta.threshold;
+  const dataset = technical && technical.metrics && technical.metrics.dataset
+    ? technical.metrics.dataset
+    : {
+        rows_train: 0,
+        rows_val: meta.rows_val || 0,
+        rows_test: meta.rows_test || 0,
+        n_features: 0
+      };
 
   state.source = "demo";
   document.getElementById("tab-demo").classList.add("is-active");
   document.getElementById("tab-upload").classList.remove("is-active");
   document.getElementById("upload-card").hidden = true;
-  setPayloadVisibility(false);
-  document.getElementById("technical-section").hidden = true;
-  replayButton.hidden = true;
   updateSourceNote();
   renderBadges();
 
+  // Lấy mốc số trước khi dựng lại bảng. Nút "Chạy lại" sẽ có sẵn số của lần
+  // trước; với lượt đầu thì deriveSpeedStart() tự tạo mốc gần số cuối.
+  const numberStarts = captureNumberStarts();
+
   showLoader(
     "Khởi động mô hình",
-    "Nạp vectorizer TF-IDF và hệ số Logistic Regression...",
-    { progress: 5 }
+    "Nạp vectorizer TF-IDF và hệ số Logistic Regression..."
   );
+
+  const reviews = await ensureDemoReviews();
+  if (Array.isArray(reviews) && reviews.length > 0) {
+    demo.reviews = reviews;
+    applyPayload(demo, "demo");
+    setPayloadVisibility(true);
+    updateSourceNote();
+    renderBadges();
+    loading_skeleton(true, { starts: numberStarts });
+  } else {
+    setPayloadVisibility(false);
+  }
+
   await pause(BOOT_PAUSE_MS);
   completeLoaderStep(
     "Khởi động mô hình",
@@ -501,51 +1125,43 @@ async function runProcessingSequence() {
   );
 
   setLoaderText(
-    "Nạp dữ liệu demo",
-    "Đọc " + countText(summary.total) + " review từ DuLieuDemo/data_reviews.js..."
+    "Nạp dữ liệu huấn luyện",
+    "Đọc " + countText(dataset.rows_train) + " train / " +
+    countText(dataset.rows_val) + " val / " +
+    countText(dataset.rows_test) + " test..."
   );
-  setLoaderProgress(15);
-  const reviews = await ensureDemoReviews();
   await pause(BOOT_PAUSE_MS);
 
   if (!Array.isArray(reviews) || reviews.length === 0) {
-    hideLoader();
-    document.getElementById("technical-section").hidden = false;
-    renderTechnical(demo.technical, demo.meta);
-    applyPayload(demo, "demo");
-    setPayloadVisibility(true);
-    setTableMessage(
-      "Không nạp được data_reviews.js. Hãy chạy: python MaNguon\\export_web_data.py",
-      true
-    );
-    replayButton.hidden = false;
+    completeLoaderStep("Nạp dữ liệu huấn luyện", "Không đọc được data_reviews.js");
+    setLoaderText("Dừng", "Hãy chạy python MaNguon\\export_web_data.py rồi tải lại trang.");
+      showResultPanel();
     return;
   }
 
   completeLoaderStep(
-    "Nạp dữ liệu demo",
-    countText(reviews.length) + " review từ data_reviews.js"
+    "Nạp dữ liệu huấn luyện",
+    countText(dataset.rows_train) + " train · " +
+    countText(dataset.rows_val) + " val · " +
+    countText(dataset.rows_test) + " test"
   );
 
   setLoaderText(
-    "Trích đặc trưng",
+    "Trích đặc trưng TF-IDF",
     "Chuẩn hoá chữ và đếm token trên từng review..."
   );
-  const aggregate = await aggregateDemoReviews(reviews, function (ratio) {
-    setLoaderProgress(15 + ratio * 45);
-  });
+  const aggregate = await aggregateDemoReviews(reviews);
   await pause(BOOT_PAUSE_MS);
   completeLoaderStep(
-    "Trích đặc trưng",
-    countText(aggregate.total) + " review · " +
-    countText(aggregate.useful) + " hữu ích"
+    "Trích đặc trưng TF-IDF",
+    countText(dataset.n_features) + " đặc trưng · " +
+    countText(aggregate.total) + " review"
   );
 
   setLoaderText(
     "Dự đoán xác suất",
     "Áp ngưỡng " + threshold.toFixed(2) + " và xếp nhóm cho từng review..."
   );
-  setLoaderProgress(70);
   await pause(BOOT_PAUSE_MS);
   completeLoaderStep(
     "Dự đoán xác suất",
@@ -554,25 +1170,25 @@ async function runProcessingSequence() {
   );
 
   setLoaderText(
-    "Tổng hợp báo cáo",
-    "Dựng bảng 5 sao, bộ lọc và biểu đồ..."
+    "Đánh giá trên tập test",
+    "Tính F1, ma trận nhầm và độ tin cậy của xác suất..."
   );
-  setLoaderProgress(86);
-  demo.reviews = reviews;
+  await pause(BOOT_PAUSE_MS);
+  const testMetrics = technical.metrics.test;
+  completeLoaderStep(
+    "Đánh giá trên tập test",
+    "F1 " + percentText(testMetrics.f1) +
+    " · accuracy " + percentText(testMetrics.accuracy)
+  );
 
-  // Phải hiện thẻ kỹ thuật TRƯỚC khi vẽ: SVG đo chiều rộng thật, thẻ đang
-  // display:none sẽ cho chiều rộng 0 và biểu đồ bị bóp lại.
-  document.getElementById("technical-section").hidden = false;
-  renderTechnical(demo.technical, demo.meta);
-  applyPayload(demo, "demo");
-  setPayloadVisibility(true);
-  updateSourceNote();
-  renderBadges();
+  setLoaderText(
+    "Tổng hợp báo cáo",
+    "Dựng bảng preview và biểu đồ cho từng giai đoạn..."
+  );
   await pause(BOOT_PAUSE_MS);
   completeLoaderStep(
     "Tổng hợp báo cáo",
-    "5 nhóm · bảng 5 sao · biểu đồ cho " +
-    countText(aggregate.total) + " review"
+    "5 nhóm · bảng 5 sao · " + countText(aggregate.total) + " review"
   );
 
   let finalDetail;
@@ -585,10 +1201,838 @@ async function runProcessingSequence() {
   }
   setLoaderText("Hoàn tất", finalDetail);
   completeLoaderStep("Hoàn tất", finalDetail);
-  setLoaderProgress(100);
-  await pause(BOOT_PAUSE_MS);
+  await pause(UPLOAD_RESULT_HOLD_MS);
+  showResultPanel();
+}
+
+/* ============================================================
+   Bảng kết quả sau khi chạy xong
+   ============================================================ */
+
+let activeResultStage = 0;
+
+function resultBlock(title, hintText) {
+  const block = createDiv("result-block");
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  block.appendChild(heading);
+  if (hintText) {
+    block.appendChild(createDiv("hint", hintText));
+  }
+  return block;
+}
+
+function shortText(text, maxLength) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return value.slice(0, maxLength) + "…";
+}
+
+function makeResultTable(headers, rows, limit) {
+  const wrap = createDiv("result-table-wrap");
+  const table = document.createElement("table");
+  table.className = "result-table";
+
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (let i = 0; i < headers.length; i++) {
+    const cell = document.createElement("th");
+    cell.textContent = headers[i];
+    headRow.appendChild(cell);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  const rowLimit = limit || rows.length;
+  for (let i = 0; i < Math.min(rows.length, rowLimit); i++) {
+    const row = document.createElement("tr");
+    for (let j = 0; j < headers.length; j++) {
+      const cell = document.createElement("td");
+      cell.textContent = String(rows[i][j] === undefined || rows[i][j] === null
+        ? "" : rows[i][j]);
+      row.appendChild(cell);
+    }
+    tbody.appendChild(row);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+/* ============================================================
+   Bảng nạp dần khi cuộn + tìm kiếm không dấu
+   ============================================================ */
+
+// Chuẩn hoá để tìm cả "nha binh" lẫn "nhà bình". map lưu vị trí của từng ký tự
+// đã gập lại trong chuỗi gốc, nên khi tô vàng vẫn trúng đúng chữ có dấu.
+function foldForSearch(value) {
+  const source = String(value === undefined || value === null ? "" : value);
+  let folded = "";
+  const map = [];
+  for (let i = 0; i < source.length; i++) {
+    const char = source.charAt(i);
+    const decomposed = char.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    const base = decomposed === "đ" ? "d" : decomposed;
+    for (let j = 0; j < base.length; j++) {
+      folded += base.charAt(j);
+      map.push(i);
+    }
+  }
+  return { text: folded, map: map };
+}
+
+function appendHighlightedText(cell, value, query) {
+  const source = String(value === undefined || value === null ? "" : value);
+  const needle = query ? foldForSearch(query).text : "";
+  if (!needle) {
+    cell.textContent = source;
+    return;
+  }
+
+  const folded = foldForSearch(source);
+  let cursor = 0;
+  let found = folded.text.indexOf(needle);
+  if (found === -1) {
+    cell.textContent = source;
+    return;
+  }
+
+  while (found !== -1) {
+    const start = folded.map[found];
+    const end = folded.map[found + needle.length - 1] + 1;
+    if (start > cursor) {
+      cell.appendChild(document.createTextNode(source.slice(cursor, start)));
+    }
+    const mark = document.createElement("mark");
+    mark.textContent = source.slice(start, end);
+    cell.appendChild(mark);
+    cursor = end;
+    found = folded.text.indexOf(needle, found + needle.length);
+  }
+  if (cursor < source.length) {
+    cell.appendChild(document.createTextNode(source.slice(cursor)));
+  }
+}
+
+// Gắn nạp dần vào một tbody có sẵn. Gọi lại khi đổi bộ lọc sẽ thay controller
+// cũ trên cùng khung cuộn, nên không bao giờ chồng nhiều listener.scroll.
+function bindInfiniteTable(body, scrollHost, options) {
+  const settings = options || {};
+  const rows = Array.isArray(settings.rows) ? settings.rows : [];
+  const query = settings.query || "";
+  const status = settings.status || null;
+  const totalText = settings.totalText || countText(rows.length) + " dòng";
+
+  if (scrollHost._infiniteController) {
+    scrollHost.removeEventListener("scroll", scrollHost._infiniteController.onScroll);
+  }
+
+  let rendered = 0;
+
+  function updateStatus() {
+    if (!status) {
+      return;
+    }
+    if (rows.length === 0) {
+      status.textContent = settings.emptyText || "Không có dòng nào khớp bộ lọc.";
+    } else if (rendered >= rows.length) {
+      status.textContent = "Đã hiện toàn bộ " + countText(rows.length) +
+        " / " + totalText + ".";
+    } else {
+      status.textContent = "Đang hiện " + countText(rendered) + " / " + totalText +
+        " · cuộn xuống để nạp thêm.";
+    }
+  }
+
+  function appendBatch() {
+    if (rendered >= rows.length) {
+      updateStatus();
+      return;
+    }
+    const end = Math.min(rendered + INFINITE_PAGE_SIZE, rows.length);
+    const fragment = document.createDocumentFragment();
+    for (let i = rendered; i < end; i++) {
+      const rowNode = document.createElement("tr");
+      const values = rows[i];
+      for (let j = 0; j < values.length; j++) {
+        const cell = document.createElement("td");
+        appendHighlightedText(cell, values[j], query);
+        rowNode.appendChild(cell);
+      }
+      fragment.appendChild(rowNode);
+    }
+    body.appendChild(fragment);
+    rendered = end;
+    updateStatus();
+  }
+
+  function onScroll() {
+    const remaining = scrollHost.scrollHeight - scrollHost.scrollTop - scrollHost.clientHeight;
+    if (remaining <= 48) {
+      appendBatch();
+    }
+  }
+
+  body.replaceChildren();
+  scrollHost.addEventListener("scroll", onScroll);
+  scrollHost._infiniteController = { onScroll: onScroll };
+  appendBatch();
+
+  // Nếu 100 dòng đầu chưa đủ đầy khung thì nạp thêm vài lô để thanh cuộn xuất hiện.
+  let guard = 0;
+  while (rendered < rows.length &&
+         scrollHost.scrollHeight <= scrollHost.clientHeight + 8 &&
+         guard < 3) {
+    appendBatch();
+    guard++;
+  }
+  scrollHost.scrollTop = 0;
+}
+
+// Dùng cho hai bảng preview trong result panel: tạo khung giống makeResultTable
+// rồi gắn cơ chế nạp dần vào toàn bộ dòng thay vì chỉ mười dòng đầu.
+function makeInfiniteResultTable(headers, rows, options) {
+  const settings = options || {};
+  const wrap = makeResultTable(headers, [], 0);
+  wrap.classList.add("infinite-scroll-wrap");
+  const body = wrap.querySelector("tbody");
+  const status = createDiv("hint infinite-status", "");
+  wrap.appendChild(status);
+  if (body) {
+    bindInfiniteTable(body, wrap, {
+      rows: rows,
+      query: settings.query || "",
+      status: status,
+      totalText: countText(rows.length) + " review"
+    });
+  }
+  return wrap;
+}
+
+function labelText(value) {
+  const demo = state.demoData;
+  const threshold = demo && demo.meta ? demo.meta.threshold : 0.5;
+  return Number(value) >= threshold ? "Giả" : "Thật";
+}
+
+function countTopTokens(reviews) {
+  const counts = new Map();
+  const stopWords = new Set([
+    "the", "a", "an", "and", "or", "but", "is", "was", "were", "be", "been",
+    "it", "this", "that", "i", "my", "me", "we", "our", "you", "your", "they",
+    "them", "their", "to", "of", "in", "on", "for", "with", "at", "as", "so",
+    "very", "just", "not", "have", "has", "had", "do", "does", "did", "if",
+    "from", "would", "could", "should", "there", "here", "one", "get", "got"
+  ]);
+  let totalWords = 0;
+
+  for (let i = 0; i < reviews.length; i++) {
+    const tokens = String(reviews[i].text || "")
+      .toLowerCase()
+      .match(/[a-z][a-z']+/g) || [];
+    totalWords += tokens.length;
+    for (let j = 0; j < tokens.length; j++) {
+      const token = tokens[j];
+      if (token.length < 3 || stopWords.has(token)) {
+        continue;
+      }
+      counts.set(token, (counts.get(token) || 0) + 1);
+    }
+  }
+
+  const top = Array.from(counts.entries())
+    .sort(function (a, b) { return b[1] - a[1]; })
+    .slice(0, 10);
+  return { totalWords, uniqueWords: counts.size, top };
+}
+
+function makeTokenChart(tokens) {
+  const width = 560;
+  const rowHeight = 24;
+  const height = tokens.length * rowHeight + 16;
+  const left = 130;
+  const barMax = width - left - 56;
+  let maxCount = 1;
+  for (let i = 0; i < tokens.length; i++) {
+    maxCount = Math.max(maxCount, tokens[i][1]);
+  }
+
+  const svg = createSvg("svg", {
+    viewBox: "0 0 " + width + " " + height,
+    role: "img",
+    class: "result-chart"
+  });
+  for (let i = 0; i < tokens.length; i++) {
+    const y = 8 + i * rowHeight;
+    const barWidth = (tokens[i][1] / maxCount) * barMax;
+    svg.appendChild(textNode(left - 8, y + 12, tokens[i][0], "end"));
+    svg.appendChild(
+      createSvg("rect", {
+        x: left, y: y + 2, width: barWidth, height: 14, rx: 3,
+        fill: themeColor("--chart-fake", "#2563eb")
+      })
+    );
+    svg.appendChild(
+      textNode(left + barWidth + 6, y + 13, countText(tokens[i][1]), "start")
+    );
+  }
+  return svg;
+}
+
+function makeMiniHistogram(histogram, threshold) {
+  const width = 560;
+  const height = 220;
+  const left = 44;
+  const right = 12;
+  const top = 12;
+  const bottom = 34;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+
+  let maxValue = 1;
+  for (let i = 0; i < histogram.real_counts.length; i++) {
+    maxValue = Math.max(maxValue, histogram.real_counts[i], histogram.fake_counts[i]);
+  }
+
+  const svg = createSvg("svg", {
+    viewBox: "0 0 " + width + " " + height,
+    role: "img",
+    class: "result-chart"
+  });
+  const binWidth = plotWidth / histogram.real_counts.length;
+  const barWidth = Math.max(2, (binWidth - 4) / 2);
+
+  for (let i = 0; i < histogram.real_counts.length; i++) {
+    const x = left + i * binWidth + 2;
+    const realHeight = (histogram.real_counts[i] / maxValue) * plotHeight;
+    const fakeHeight = (histogram.fake_counts[i] / maxValue) * plotHeight;
+    svg.appendChild(
+      createSvg("rect", {
+        x: x, y: top + plotHeight - realHeight, width: barWidth, height: realHeight,
+        fill: themeColor("--chart-real", "#8fa0b6")
+      })
+    );
+    svg.appendChild(
+      createSvg("rect", {
+        x: x + barWidth, y: top + plotHeight - fakeHeight, width: barWidth,
+        height: fakeHeight, fill: themeColor("--chart-fake", "#2563eb")
+      })
+    );
+  }
+
+  const thresholdX = left + threshold * plotWidth;
+  svg.appendChild(
+    createSvg("line", {
+      x1: thresholdX, y1: top, x2: thresholdX, y2: top + plotHeight,
+      stroke: themeColor("--chart-marker", "#16202f"),
+      "stroke-width": 2, "stroke-dasharray": "5 4"
+    })
+  );
+  svg.appendChild(textNode(left, height - 8, "0.0", "start"));
+  svg.appendChild(textNode(left + plotWidth / 2, height - 8, "0.5", "middle"));
+  svg.appendChild(textNode(left + plotWidth, height - 8, "1.0", "end"));
+  svg.appendChild(textNode(left - 6, top + 4, countText(maxValue), "end"));
+  return svg;
+}
+
+function makeMiniCurve(points, bestThreshold) {
+  const width = 560;
+  const height = 220;
+  const left = 44;
+  const right = 12;
+  const top = 12;
+  const bottom = 34;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const first = points[0].threshold;
+  const last = points[points.length - 1].threshold;
+
+  function xOf(value) {
+    return left + ((value - first) / (last - first)) * plotWidth;
+  }
+  function yOf(value) {
+    return top + plotHeight - value * plotHeight;
+  }
+
+  const svg = createSvg("svg", {
+    viewBox: "0 0 " + width + " " + height,
+    role: "img",
+    class: "result-chart"
+  });
+  for (let i = 0; i <= 4; i++) {
+    const value = i / 4;
+    svg.appendChild(
+      createSvg("line", {
+        x1: left, y1: yOf(value), x2: left + plotWidth, y2: yOf(value),
+        stroke: themeColor("--chart-grid", "#d9e2ee"), "stroke-width": 1
+      })
+    );
+    svg.appendChild(textNode(left - 6, yOf(value) + 4, value.toFixed(1), "end"));
+  }
+
+  const series = [
+    ["precision", themeColor("--chart-s1", "#8fa0b6")],
+    ["recall", themeColor("--chart-s2", "#5b9bff")],
+    ["f1", themeColor("--chart-s3", "#2563eb")]
+  ];
+  for (let s = 0; s < series.length; s++) {
+    let pathData = "";
+    for (let i = 0; i < points.length; i++) {
+      pathData += (i === 0 ? "M" : "L") +
+        xOf(points[i].threshold).toFixed(2) + " " +
+        yOf(points[i][series[s][0]]).toFixed(2) + " ";
+    }
+    svg.appendChild(
+      createSvg("path", {
+        d: pathData, fill: "none", stroke: series[s][1], "stroke-width": 2.2
+      })
+    );
+  }
+
+  const markerX = xOf(bestThreshold);
+  svg.appendChild(
+    createSvg("line", {
+      x1: markerX, y1: top, x2: markerX, y2: top + plotHeight,
+      stroke: themeColor("--chart-marker", "#16202f"),
+      "stroke-width": 2, "stroke-dasharray": "5 4"
+    })
+  );
+  svg.appendChild(textNode(left, height - 8, first.toFixed(2), "start"));
+  svg.appendChild(textNode(left + plotWidth, height - 8, last.toFixed(2), "end"));
+  return svg;
+}
+
+function makeMiniReliability(calibration) {
+  const width = 560;
+  const height = 220;
+  const left = 44;
+  const right = 12;
+  const top = 12;
+  const bottom = 34;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+
+  function xOf(value) { return left + value * plotWidth; }
+  function yOf(value) { return top + plotHeight - value * plotHeight; }
+
+  const svg = createSvg("svg", {
+    viewBox: "0 0 " + width + " " + height,
+    role: "img",
+    class: "result-chart"
+  });
+  svg.appendChild(
+    createSvg("line", {
+      x1: xOf(0), y1: yOf(0), x2: xOf(1), y2: yOf(1),
+      stroke: themeColor("--chart-real", "#8fa0b6"),
+      "stroke-width": 2, "stroke-dasharray": "5 4"
+    })
+  );
+
+  const bins = calibration.reliability_bins;
+  let maxCount = 1;
+  for (let i = 0; i < bins.length; i++) {
+    maxCount = Math.max(maxCount, bins[i].count);
+  }
+  for (let i = 0; i < bins.length; i++) {
+    if (bins[i].count === 0 || bins[i].mean_predicted === null) {
+      continue;
+    }
+    svg.appendChild(
+      createSvg("circle", {
+        cx: xOf(bins[i].mean_predicted),
+        cy: yOf(bins[i].observed_fake_rate),
+        r: 4 + (bins[i].count / maxCount) * 7,
+        fill: themeColor("--chart-band", "rgba(37, 99, 235, 0.35)"),
+        stroke: themeColor("--chart-s3", "#2563eb"),
+        "stroke-width": 1.5
+      })
+    );
+  }
+  svg.appendChild(textNode(left, height - 8, "0.0", "start"));
+  svg.appendChild(textNode(left + plotWidth, height - 8, "1.0", "end"));
+  return svg;
+}
+
+function makeResultKpis(testMetrics) {
+  const grid = createDiv("kpi-grid");
+  const items = [
+    ["Accuracy", testMetrics.accuracy],
+    ["Precision", testMetrics.precision],
+    ["Recall", testMetrics.recall],
+    ["F1", testMetrics.f1],
+    ["ROC-AUC", testMetrics.roc_auc],
+    ["PR-AUC", testMetrics.pr_auc]
+  ];
+  for (let i = 0; i < items.length; i++) {
+    const card = createDiv(i === 3 ? "kpi is-highlight" : "kpi");
+    card.appendChild(createDiv("kpi-label", items[i][0]));
+    card.appendChild(createDiv("kpi-value", percentText(items[i][1])));
+    grid.appendChild(card);
+  }
+  return grid;
+}
+
+function makeResultConfusion(matrix) {
+  const grid = createDiv("confusion-grid");
+  grid.appendChild(createDiv("confusion-axis", ""));
+  grid.appendChild(createDiv("confusion-axis", "Dự đoán: Thật"));
+  grid.appendChild(createDiv("confusion-axis", "Dự đoán: Giả"));
+  grid.appendChild(createDiv("confusion-axis", "Thực tế: Thật"));
+  grid.appendChild(createDiv("confusion-cell cell-tn", "TN " + countText(matrix.tn)));
+  grid.appendChild(createDiv("confusion-cell cell-fp", "FP " + countText(matrix.fp)));
+  grid.appendChild(createDiv("confusion-axis", "Thực tế: Giả"));
+  grid.appendChild(createDiv("confusion-cell cell-fn", "FN " + countText(matrix.fn)));
+  grid.appendChild(createDiv("confusion-cell cell-tp", "TP " + countText(matrix.tp)));
+  return grid;
+}
+
+function getResultStages() {
+  const demo = state.demoData;
+  const meta = demo.meta;
+  const technical = demo.technical;
+  const dataset = technical.metrics.dataset;
+  const testMetrics = technical.metrics.test;
+  const reviews = Array.isArray(demo.reviews) ? demo.reviews : [];
+
+  return [
+    {
+      name: "1. Khởi tạo",
+      build: function () {
+        const root = createDiv("result-stage");
+        const block = resultBlock(
+          "Cấu hình mô hình",
+          "Các giá trị này do bước huấn luyện ghi vào data_meta.js."
+        );
+        block.appendChild(makeResultTable(["Thông tin", "Giá trị"], [
+          ["Mô hình", meta.model],
+          ["Ngưỡng quyết định", meta.threshold.toFixed(2)],
+          ["Lần chạy model", "#" + (meta.model_run_id || "?")],
+          ["Phiên bản dữ liệu", meta.data_version || "?"],
+          ["Thời điểm sinh", meta.generated_at || "?"],
+          ["Số đặc trưng TF-IDF", countText(dataset.n_features)]
+        ]));
+        root.appendChild(block);
+
+        const note = resultBlock(
+          "Chạy huấn luyện thật",
+          "Trang web chỉ trình bày lại kết quả đã lưu trong dự án."
+        );
+        note.appendChild(
+          createDiv("hint", "Để huấn luyện lại từ đầu: $env:PYTHONIOENCODING='utf-8'; python MaNguon\\train_baseline.py")
+        );
+        root.appendChild(note);
+        return root;
+      }
+    },
+    {
+      name: "2. Dữ liệu",
+      build: function () {
+        const root = createDiv("result-stage");
+        const split = resultBlock(
+          "Ba tập dữ liệu",
+          "Mỗi tập giữ một vai trò riêng, không gộp vào nhau."
+        );
+        split.appendChild(makeResultTable(["Tập", "Số review", "Vai trò"], [
+          ["train", countText(dataset.rows_train), "Học trọng số TF-IDF và bộ phân loại"],
+          ["val", countText(dataset.rows_val), "Hiệu chuẩn xác suất, chọn ngưỡng"],
+          ["test", countText(dataset.rows_test), "Chấm điểm cuối, giữ kín đến khi chốt"]
+        ]));
+        root.appendChild(split);
+
+        const preview = resultBlock(
+          "Preview review đầu vào",
+          countText(reviews.length) + " dòng của tập test, nạp dần khi cuộn."
+        );
+        const rows = [];
+        for (let i = 0; i < reviews.length; i++) {
+          const review = reviews[i];
+          rows.push([
+            review.row_index,
+            shortText(review.text, 90),
+            review.rating,
+            review.true_label === 1 ? "Giả" : "Thật",
+            percentText(review.prob_fake)
+          ]);
+        }
+        preview.appendChild(
+          makeInfiniteResultTable(
+            ["#", "Nội dung", "Sao", "Nhãn thật", "Xác suất giả"], rows
+          )
+        );
+        root.appendChild(preview);
+        return root;
+      }
+    },
+    {
+      name: "3. Đặc trưng",
+      build: function () {
+        const tokenInfo = countTopTokens(reviews);
+        const root = createDiv("result-stage");
+        const stats = resultBlock(
+          "Thống kê token",
+          "Đếm trực tiếp trên các review trong trình duyệt."
+        );
+        stats.appendChild(makeResultTable(["Chỉ số", "Giá trị"], [
+          ["Tổng số từ", countText(tokenInfo.totalWords)],
+          ["Từ khác nhau (bỏ stopword)", countText(tokenInfo.uniqueWords)],
+          ["Trung bình mỗi review", (tokenInfo.totalWords / Math.max(1, reviews.length)).toFixed(1)],
+          ["Đặc trưng TF-IDF đã lưu", countText(dataset.n_features)]
+        ]));
+        root.appendChild(stats);
+
+        const chart = resultBlock(
+          "Từ xuất hiện nhiều nhất",
+          "Mười từ thông tin xuất hiện nhiều nhất sau khi bỏ stopword."
+        );
+        chart.appendChild(makeTokenChart(tokenInfo.top));
+        root.appendChild(chart);
+        return root;
+      }
+    },
+    {
+      name: "4. Xác suất",
+      build: function () {
+        const root = createDiv("result-stage");
+        const chart = resultBlock(
+          "Phân bố xác suất trên tập test",
+          "Xám là nhãn thật, xanh là nhãn giả; nét đứt là ngưỡng " +
+          meta.threshold.toFixed(2) + "."
+        );
+        chart.appendChild(makeMiniHistogram(technical.histogram, meta.threshold));
+        root.appendChild(chart);
+
+        const preview = resultBlock(
+          "Preview dự đoán",
+          "Tất cả review cùng xác suất đã hiệu chuẩn, nạp dần khi cuộn."
+        );
+        const rows = [];
+        for (let i = 0; i < reviews.length; i++) {
+          const review = reviews[i];
+          rows.push([
+            review.row_index,
+            shortText(review.text, 60),
+            percentText(review.prob_fake),
+            labelText(review.prob_fake),
+            review.true_label === review.predicted_label ? "Đúng" : "Sai"
+          ]);
+        }
+        preview.appendChild(
+          makeInfiniteResultTable(
+            ["#", "Nội dung", "Xác suất giả", "Dự đoán", "So với nhãn thật"], rows
+          )
+        );
+        root.appendChild(preview);
+        return root;
+      }
+    },
+    {
+      name: "5. Đánh giá",
+      build: function () {
+        const root = createDiv("result-stage");
+        const kpi = resultBlock(
+          "Chỉ số trên tập test",
+          "Đo sau khi ngưỡng đã chốt trên tập val."
+        );
+        kpi.appendChild(makeResultKpis(testMetrics));
+        root.appendChild(kpi);
+
+        const matrix = resultBlock(
+          "Ma trận nhầm",
+          "Hàng là nhãn thật, cột là nhãn dự đoán."
+        );
+        matrix.appendChild(makeResultConfusion(testMetrics.confusion_matrix));
+        root.appendChild(matrix);
+
+        const validation = technical.metrics.validation;
+        const curve = resultBlock(
+          "Chọn ngưỡng trên tập val",
+          "F1 đạt đỉnh tại ngưỡng " + validation.best_threshold.toFixed(2) +
+          " (F1 " + percentText(validation.best_f1) + ")."
+        );
+        curve.appendChild(makeMiniCurve(technical.threshold_curve, meta.threshold));
+        root.appendChild(curve);
+        return root;
+      }
+    },
+    {
+      name: "6. Tổng hợp",
+      build: function () {
+        const root = createDiv("result-stage");
+        const log = resultBlock(
+          "Nhật ký các bước",
+          "Kết quả cuối cùng của từng giai đoạn vừa chạy."
+        );
+        const rows = [];
+        for (let i = 0; i < loaderState.steps.length; i++) {
+          rows.push([i + 1, loaderState.steps[i].name, loaderState.steps[i].result]);
+        }
+        log.appendChild(makeResultTable(["#", "Giai đoạn", "Kết quả"], rows));
+        root.appendChild(log);
+
+        const calibration = technical.metrics.calibration;
+        const reliability = resultBlock(
+          "Độ tin cậy của xác suất",
+          "Brier " + calibration.brier_before + " → " + calibration.brier_after +
+          " · ECE " + calibration.ece_before + " → " + calibration.ece_after + "."
+        );
+        reliability.appendChild(makeMiniReliability(calibration));
+        root.appendChild(reliability);
+        return root;
+      }
+    }
+  ];
+}
+
+function renderResultStage(index) {
+  activeResultStage = index;
+  const content = document.getElementById("result-content");
+  if (!content) {
+    return;
+  }
+
+  const tabs = document.querySelectorAll("#result-tabs .result-tab");
+  for (let i = 0; i < tabs.length; i++) {
+    const isActive = i === index;
+    tabs[i].classList.toggle("is-active", isActive);
+    tabs[i].setAttribute("aria-selected", isActive ? "true" : "false");
+  }
+
+  content.replaceChildren();
+  const demo = state.demoData;
+  if (!demo || !Array.isArray(demo.reviews) || demo.reviews.length === 0) {
+    content.appendChild(resultBlock(
+      "Chưa nạp được dữ liệu review",
+      "Hãy chạy python MaNguon\\export_web_data.py rồi tải lại trang."
+    ));
+    return;
+  }
+
+  const stages = getResultStages();
+  if (stages[index]) {
+    content.appendChild(stages[index].build());
+  }
+}
+
+function buildResultTabs() {
+  const container = document.getElementById("result-tabs");
+  if (!container) {
+    return;
+  }
+  container.replaceChildren();
+
+  const stages = getResultStages();
+  for (let i = 0; i < stages.length; i++) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = i === activeResultStage ? "result-tab is-active" : "result-tab";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", i === activeResultStage ? "true" : "false");
+    button.textContent = stages[i].name;
+    button.addEventListener("click", function () {
+      renderResultStage(i);
+    });
+    container.appendChild(button);
+  }
+}
+
+function showResultPanel() {
+  const screen = document.getElementById("loader-screen");
+  const panel = document.getElementById("result-panel");
+  const thinking = document.getElementById("loader-panel");
+  if (!screen || !panel) {
+    return;
+  }
+
+  // Thinking đã xong: dừng đồng hồ và mở khoá nút "Chạy lại" trong result panel.
+  window.clearInterval(loaderState.timerId);
+  loaderState.timerId = 0;
+  document.body.classList.remove("is-processing");
+
+  if (thinking) {
+    thinking.hidden = true;
+  }
+  panel.hidden = false;
+  screen.classList.add("is-result");
+
+  // Đổi nội dung trong cùng một khung nút, không thêm/bớt nút làm xô bố cục.
+  const cancelButton = document.getElementById("loader-cancel");
+  if (cancelButton) {
+    cancelButton.hidden = true;
+  }
+  const resultActions = document.getElementById("result-actions");
+  if (resultActions) {
+    resultActions.hidden = false;
+  }
+  // Header chỉ có một nút chạy: trước là Chạy file, sau là Chạy lại.
+  const headerRun = document.getElementById("train-button");
+  if (headerRun) {
+    headerRun.textContent = "Chạy lại quá trình";
+  }
+
+  const demo = state.demoData;
+  const subtitle = document.getElementById("result-subtitle");
+  if (subtitle) {
+    subtitle.textContent = demo
+      ? countText(demo.meta.rows_test) + " review test · ngưỡng " +
+        demo.meta.threshold.toFixed(2) + " · F1 " +
+        percentText(demo.technical.metrics.test.f1) +
+        ". Chọn tab để xem chi tiết từng giai đoạn."
+      : "Chọn tab để xem chi tiết.";
+  }
+
+  const note = document.getElementById("result-note");
+  if (note) {
+    note.textContent = "Đây là kết quả đã lưu trong dự án, được trình bày lại theo từng bước.";
+  }
+
+  activeResultStage = 0;
+  buildResultTabs();
+  renderResultStage(0);
+}
+
+function closeResultPanel() {
+  // Phải đọc kế hoạch trước khi hideLoader()/applyPayload() dựng lại các ô số.
+  const rushPlan = collectSkeletonRushPlan();
+  loading_skeleton(false);
   hideLoader();
-  replayButton.hidden = false;
+
+  const demo = state.demoData;
+  if (!demo) {
+    return;
+  }
+  demo.reviews = Array.isArray(demo.reviews) ? demo.reviews : [];
+  applyPayload(demo, "demo");
+  setPayloadVisibility(true);
+  updateSourceNote();
+  renderBadges();
+  applyRushPlan(rushPlan);
+
+  // Đóng xong thì đưa người xem thẳng tới thẻ có các con số đang chạy tăng tốc.
+  const summaryCard = document.getElementById("summary-card");
+  if (summaryCard) {
+    summaryCard.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+// Huỷ khi đang thinking: dừng luồng, ẩn loader, đưa các thẻ kết quả về trạng
+// thái trước khi bấm chạy. Không áp số liệu và không cuộn trang.
+function cancelProcessing() {
+  if (!document.body.classList.contains("is-processing")) {
+    return;
+  }
+  loaderState.cancelled = true;
+  hideLoader();
+  setPayloadVisibility(loaderState.cardsVisible === true);
+
+  const message = "Đã huỷ quá trình. Dữ liệu preview giữ nguyên.";
+  const statusId = state.source === "upload" ? "editor-status" : "preview-status";
+  const status = document.getElementById(statusId);
+  if (status) {
+    status.textContent = message;
+  }
 }
 
 /* ============================================================
@@ -639,6 +2083,23 @@ function makeTag(text, className) {
   const element = document.createElement("span");
   element.className = "tag " + className;
   element.textContent = text;
+  return element;
+}
+
+// Tag bấm được trong từng dòng bảng. Dùng button để có focus và :active, nhưng
+// vẫn mang class .tag/.category-tag để giữ nguyên màu cũ.
+function makeActionTag(text, className, onClick, title) {
+  const element = document.createElement("button");
+  element.type = "button";
+  element.className = className + " tag-button";
+  element.textContent = text;
+  if (title) {
+    element.title = title;
+  }
+  element.addEventListener("click", function (event) {
+    event.stopPropagation();
+    onClick();
+  });
   return element;
 }
 
@@ -732,14 +2193,39 @@ function reviewReasonTexts(review) {
   return [];
 }
 
-function makeCategoryTag(categoryId) {
+function makeCategoryTag(categoryId, interactive) {
   const info = categoryInfo(categoryId);
+  const className = "category-tag " + categoryClass(categoryId);
 
-  const tag = document.createElement("span");
-  tag.className = "category-tag " + categoryClass(categoryId);
+  if (!interactive) {
+    const tag = document.createElement("span");
+    tag.className = className;
+    tag.appendChild(document.createTextNode(info.label));
+    return tag;
+  }
 
-  tag.appendChild(document.createTextNode(info.label));
-  return tag;
+  return makeActionTag(
+    info.label,
+    className,
+    function () {
+      setFilter(categoryId);
+    },
+    "Lọc theo nhóm: " + info.label
+  );
+}
+
+// Gom rating lẻ về số nguyên giống cột phân bố 5 sao. Trả về null khi không
+// có rating hợp lệ để các phép lọc không biến 0 thành "0 sao".
+function roundedStar(rating) {
+  if (rating === null || rating === undefined) {
+    return null;
+  }
+  const value = Math.round(Number(rating));
+  return isNaN(value) || value < 1 || value > 5 ? null : value;
+}
+
+function starNumber() {
+  return state.star === "all" ? null : Number(state.star);
 }
 
 function starsText(rating) {
@@ -777,6 +2263,8 @@ function renderSummary() {
     card.type = "button";
     card.className =
       "category-card tone-" + info.tone + " " + categoryClass(categoryId);
+    // playCardEntrance() đọc id này để gán animation-delay riêng cho từng nhóm.
+    card.dataset.category = categoryId;
     if (state.filter === categoryId) {
       card.className = card.className + " is-active";
     }
@@ -790,12 +2278,30 @@ function renderSummary() {
     topLine.appendChild(createDiv("category-label", info.label));
     card.appendChild(topLine);
 
-    card.appendChild(createDiv("category-count", countText(count)));
-    card.appendChild(createDiv("category-percent", percent.toFixed(1) + "%"));
+    const finalCountText = countText(count);
+    const finalPercentText = percent.toFixed(1) + "%";
+    const countNode = createDiv(
+      "category-count",
+      revealPending ? "0" : finalCountText
+    );
+    const percentNode = createDiv(
+      "category-percent",
+      revealPending ? "0%" : finalPercentText
+    );
+    // Giữ số thật ở dataset để nút "Hiện lại dữ liệu" biết đích cần chạy tới.
+    countNode.dataset.finalText = finalCountText;
+    percentNode.dataset.finalText = finalPercentText;
+    card.appendChild(countNode);
+    card.appendChild(percentNode);
 
     const bar = createDiv("category-bar");
     const fill = createDiv("category-bar-fill");
-    fill.style.width = percent + "%";
+    fill.style.width = revealPending ? "0%" : percent + "%";
+    // Mốc để reportRushProgress() chạy thanh từ 0 lên đúng tỉ lệ của nhóm.
+    fill.dataset.finalWidth = percent + "%";
+    if (revealPending) {
+      fill.dataset.rushProgress = "0";
+    }
     bar.appendChild(fill);
     card.appendChild(bar);
 
@@ -841,18 +2347,74 @@ function renderSummary() {
    Bảng phân bố 5 sao
    ============================================================ */
 
-function makeStarMeter(value, maxValue, fillClass) {
-  const cell = createDiv("star-meter");
+function makeStarMeter(value, maxValue, fillClass, options) {
+  const settings = options || {};
+  const interactive = Boolean(settings.interactive);
+
+  const cell = interactive ? document.createElement("button") : createDiv("star-meter");
+  if (interactive) {
+    cell.type = "button";
+    cell.className = "star-meter star-meter-button";
+    cell.dataset.star = String(settings.star);
+    cell.dataset.scope = settings.scope;
+    cell.disabled = value === 0;
+    const scopeName = settings.scope === "all" ? "Tất cả" : "Sau khi lọc hữu ích";
+    cell.setAttribute(
+      "aria-label",
+      scopeName + ", " + settings.star + " sao, " + countText(value) +
+      " review. Bấm để lọc bảng."
+    );
+  }
 
   const track = createDiv("star-meter-track");
   const fill = createDiv("star-meter-fill " + fillClass);
   const width = maxValue > 0 ? (value / maxValue) * 100 : 0;
-  fill.style.width = Math.min(100, width) + "%";
+  const finalWidth = Math.min(100, width) + "%";
+  fill.style.width = revealPending ? "0%" : finalWidth;
+  fill.dataset.finalWidth = finalWidth;
   track.appendChild(fill);
 
+  const finalCountText = countText(value);
+  const countNode = createDiv(
+    "star-meter-count",
+    revealPending ? "0" : finalCountText
+  );
+  countNode.dataset.finalText = finalCountText;
   cell.appendChild(track);
-  cell.appendChild(createDiv("star-meter-count", countText(value)));
+  cell.appendChild(countNode);
+
+  if (interactive) {
+    const scopeFilter = settings.scope === "all" ? "all" : "genuine";
+    const active = state.star === String(settings.star) &&
+      state.filter === scopeFilter;
+    if (active) {
+      cell.classList.add("is-active");
+    }
+    cell.setAttribute("aria-pressed", active ? "true" : "false");
+    cell.addEventListener("click", function () {
+      selectStarFromMeter(settings.star, settings.scope);
+    });
+  }
+
   return cell;
+}
+
+// Nhịp nảy rất nhẹ đúng thanh vừa bấm. Class tự tháo để hover lại thuộc về CSS.
+function pulseStarMeter(meter) {
+  if (reducedMotionEnabled() || !meter) {
+    return;
+  }
+  meter.classList.remove("is-pulsing");
+  // Bắt đầu lại animation ngay cả khi bấm liên tiếp cùng một thanh.
+  void meter.offsetWidth;
+  meter.classList.add("is-pulsing");
+  meter.addEventListener("animationend", function done(event) {
+    if (event.animationName !== "meter-pulse") {
+      return;
+    }
+    meter.removeEventListener("animationend", done);
+    meter.classList.remove("is-pulsing");
+  });
 }
 
 function renderStarPanel() {
@@ -882,14 +2444,25 @@ function renderStarPanel() {
     const removedCount = allCount - usefulCount;
 
     const row = createDiv("star-row");
+    if (state.star === String(value)) {
+      row.classList.add("is-star-selected");
+    }
 
     const ratingCell = createDiv("star-rating");
     ratingCell.appendChild(createDiv("star-glyphs", starsText(value)));
     ratingCell.appendChild(createDiv("star-value", value + " sao"));
     row.appendChild(ratingCell);
 
-    row.appendChild(makeStarMeter(allCount, maxAll, "fill-all"));
-    row.appendChild(makeStarMeter(usefulCount, maxAll, "fill-useful"));
+    row.appendChild(makeStarMeter(allCount, maxAll, "fill-all", {
+      interactive: true,
+      star: value,
+      scope: "all"
+    }));
+    row.appendChild(makeStarMeter(usefulCount, maxAll, "fill-useful", {
+      interactive: true,
+      star: value,
+      scope: "useful"
+    }));
 
     const removedText = removedCount > 0 ? "−" + countText(removedCount) : "0";
     row.appendChild(createDiv("star-removed", removedText));
@@ -913,16 +2486,75 @@ function renderStarPanel() {
    Bộ lọc
    ============================================================ */
 
+function scrollTableIntoView() {
+  const tableCard = document.getElementById("table-card");
+  if (tableCard) {
+    tableCard.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+// Vẽ lại đúng những phần bị bộ lọc làm thay đổi. Không gọi renderSummary() ở
+// setStar/setQuery: số ở thẻ nhóm là số gốc của cả tập, không đổi theo tìm kiếm.
+function renderFilterViews() {
+  renderSummary();
+  renderStarPanel();
+  renderFilterChips();
+  renderStarMenu();
+  renderActiveFilters();
+  renderTable();
+}
+
 function setFilter(filterId) {
   state.filter = filterId;
   state.currentPage = 1;
+  renderFilterViews();
+  scrollTableIntoView();
+}
 
-  renderSummary();
-  renderFilterChips();
+function setStar(starKey) {
+  state.star = starKey;
+  state.currentPage = 1;
+  renderStarPanel();
+  renderStarMenu();
+  renderActiveFilters();
   renderTable();
+}
 
-  const tableCard = document.getElementById("table-card");
-  tableCard.scrollIntoView({ behavior: "smooth", block: "start" });
+// Click thanh trong biểu đồ: cột "Tất cả" đặt nhóm về Tất cả, cột "Sau khi lọc"
+// đặt nhóm về Hữu ích. Bấm đúng thanh đang active thì chỉ bỏ sao, giữ nhóm.
+function selectStarFromMeter(value, scope) {
+  const targetFilter = scope === "all" ? "all" : "genuine";
+  const starKey = String(value);
+  const wasActive = state.star === starKey && state.filter === targetFilter;
+
+  state.star = wasActive ? "all" : starKey;
+  state.filter = targetFilter;
+  state.currentPage = 1;
+  renderFilterViews();
+  pulseStarMeter(document.querySelector(
+    '.star-meter-button[data-star="' + starKey + '"][data-scope="' + scope + '"]'
+  ));
+  scrollTableIntoView();
+}
+
+function setFlag(flagName) {
+  state.flag = state.flag === flagName ? null : flagName;
+  state.currentPage = 1;
+  renderStarMenu();
+  renderActiveFilters();
+  renderTable();
+}
+
+function setQuery(query) {
+  state.query = query || "";
+  const input = document.getElementById("table-search");
+  if (input && input.value !== state.query) {
+    input.value = state.query;
+  }
+  state.currentPage = 1;
+  renderStarMenu();
+  renderActiveFilters();
+  renderTable();
 }
 
 function renderFilterChips() {
@@ -964,24 +2596,208 @@ function renderFilterChips() {
 
     container.appendChild(chip);
   }
+
+  // Dropdown sao nằm ngay sau các chip nhóm, cùng một hàng.
+  container.appendChild(buildStarDropdown());
 }
 
 /* ============================================================
    Bảng review
    ============================================================ */
 
+// Các dòng sau nhóm + cờ + ô tìm, nhưng trước khi áp sao. Chip sao đếm trên
+// cùng một tập này nên số trên chip luôn khớp với bảng khi bấm vào.
+function getBaseRows() {
+  const group = state.filter;
+  const query = foldForSearch(state.query).text;
+  const flag = state.flag;
+  const rows = [];
+
+  for (let i = 0; i < state.rows.length; i++) {
+    const review = state.rows[i];
+    if (group !== "all" && review.category !== group) {
+      continue;
+    }
+    if (flag && !(Array.isArray(review.flags) && review.flags.indexOf(flag) !== -1)) {
+      continue;
+    }
+    if (query) {
+      const haystack = foldForSearch(
+        String(review.text || "") + " " + String(review.product_category || "")
+      );
+      if (haystack.text.indexOf(query) === -1) {
+        continue;
+      }
+    }
+    rows.push(review);
+  }
+  return rows;
+}
+
 function getVisibleRows() {
-  if (state.filter === "all") {
-    return state.rows;
+  const base = getBaseRows();
+  const star = starNumber();
+  if (star === null) {
+    return base;
   }
 
   const visible = [];
-  for (let i = 0; i < state.rows.length; i++) {
-    if (state.rows[i].category === state.filter) {
-      visible.push(state.rows[i]);
+  for (let i = 0; i < base.length; i++) {
+    if (roundedStar(base[i].rating) === star) {
+      visible.push(base[i]);
     }
   }
   return visible;
+}
+
+function renderStarMenu() {
+  const menu = document.querySelector("#star-dropdown .star-dropdown-menu");
+  const label = document.querySelector("#star-dropdown .star-dropdown-label");
+  if (!menu) {
+    return;
+  }
+  if (label) {
+    label.textContent = state.star === "all"
+      ? "★ Mọi sao"
+      : "★ " + state.star + " sao";
+  }
+  menu.innerHTML = "";
+
+  // Số trên từng mức được tính trên đúng nhóm + cờ + ô tìm hiện tại, nên gõ
+  // tìm kiếm là số trong dropdown đổi theo ngay cả khi menu đang mở.
+  const base = getBaseRows();
+  const counts = [0, 0, 0, 0, 0, 0];
+  for (let i = 0; i < base.length; i++) {
+    const star = roundedStar(base[i].rating);
+    if (star !== null) {
+      counts[star]++;
+    }
+  }
+
+  const items = [{ id: "all", label: "Mọi sao", count: base.length }];
+  for (let value = 5; value >= 1; value--) {
+    items.push({
+      id: String(value),
+      label: "★".repeat(value) + " " + value + " sao",
+      count: counts[value]
+    });
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "star-option";
+    const active = state.star === item.id;
+    if (active) {
+      option.className = option.className + " is-active";
+    }
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", active ? "true" : "false");
+    option.appendChild(document.createTextNode(item.label));
+    option.appendChild(createDiv("chip-count", countText(item.count)));
+    option.addEventListener("click", function (event) {
+      event.stopPropagation();
+      setStar(item.id);
+      setStarMenuOpen(false);
+    });
+    menu.appendChild(option);
+  }
+}
+
+function setStarMenuOpen(open) {
+  const menu = document.querySelector("#star-dropdown .star-dropdown-menu");
+  const trigger = document.querySelector("#star-dropdown .star-dropdown-trigger");
+  const wrap = document.querySelector("#star-dropdown");
+  if (!menu || !trigger || !wrap) {
+    return;
+  }
+  menu.hidden = !open;
+  trigger.setAttribute("aria-expanded", open ? "true" : "false");
+  wrap.classList.toggle("is-open", open);
+}
+
+function buildStarDropdown() {
+  const wrap = createDiv("star-dropdown");
+  wrap.id = "star-dropdown";
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "filter-chip star-dropdown-trigger";
+  trigger.id = "star-dropdown-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+
+  const label = createDiv("star-dropdown-label", "★ Mọi sao");
+  label.id = "star-dropdown-label";
+  trigger.appendChild(label);
+
+  const caret = createDiv("star-dropdown-caret", "▾");
+  caret.setAttribute("aria-hidden", "true");
+  trigger.appendChild(caret);
+  trigger.addEventListener("click", function (event) {
+    event.stopPropagation();
+    setStarMenuOpen(
+      document.querySelector("#star-dropdown .star-dropdown-menu").hidden
+    );
+  });
+
+  const menu = createDiv("star-dropdown-menu");
+  menu.id = "star-dropdown-menu";
+  menu.setAttribute("role", "listbox");
+  menu.hidden = true;
+
+  wrap.appendChild(trigger);
+  wrap.appendChild(menu);
+  return wrap;
+}
+
+function bindStarDropdown() {
+  document.addEventListener("click", function (event) {
+    const wrap = document.querySelector("#star-dropdown");
+    if (wrap && !wrap.contains(event.target)) {
+      setStarMenuOpen(false);
+    }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") {
+      setStarMenuOpen(false);
+    }
+  });
+}
+
+// Những bộ lọc không có điều khiển riêng (cờ, chữ tìm) hiện thành nút nhỏ có thể
+// bỏ từng cái. Star có dropdown riêng nên không lặp lại ở đây.
+function renderActiveFilters() {
+  const host = document.getElementById("active-filters");
+  if (!host) {
+    return;
+  }
+  host.innerHTML = "";
+
+  const items = [];
+  if (state.flag) {
+    items.push({
+      label: "Cờ: " + (FLAG_INFO[state.flag] || state.flag),
+      clear: function () { setFlag(null); }
+    });
+  }
+  if (state.query) {
+    items.push({
+      label: "Tìm: " + state.query,
+      clear: function () { setQuery(""); }
+    });
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "active-filter-chip";
+    chip.title = "Bỏ bộ lọc này";
+    chip.textContent = items[i].label + " ×";
+    chip.addEventListener("click", items[i].clear);
+    host.appendChild(chip);
+  }
 }
 
 function renderTableHead() {
@@ -1045,7 +2861,9 @@ function makeReviewRow(review, index) {
   // Cột nội dung: giữ đầy đủ text, không cắt ngắn.
   const textCell = document.createElement("td");
   textCell.className = "text-cell";
-  textCell.appendChild(createDiv("review-text", review.text));
+  const reviewText = createDiv("review-text", "");
+  appendHighlightedText(reviewText, review.text, state.query);
+  textCell.appendChild(reviewText);
 
   const metaParts = [];
   if (review.product_category) {
@@ -1103,7 +2921,16 @@ function makeReviewRow(review, index) {
 
   const starCell = document.createElement("td");
   starCell.className = "star-cell";
-  starCell.appendChild(createDiv("star-glyphs", starsText(review.rating)));
+  const rounded = roundedStar(review.rating);
+  const starGlyphs = rounded === null
+    ? createDiv("star-glyphs", starsText(review.rating))
+    : makeActionTag(
+      starsText(review.rating),
+      "star-glyphs star-row-tag",
+      function () { setStar(String(rounded)); },
+      "Lọc " + rounded + " sao"
+    );
+  starCell.appendChild(starGlyphs);
   if (review.rating !== null && review.rating !== undefined) {
     starCell.appendChild(createDiv("star-number", Number(review.rating).toFixed(1)));
   }
@@ -1111,7 +2938,7 @@ function makeReviewRow(review, index) {
 
   const categoryCell = document.createElement("td");
   categoryCell.className = "category-cell";
-  categoryCell.appendChild(makeCategoryTag(review.category));
+  categoryCell.appendChild(makeCategoryTag(review.category, true));
 
   // Nhãn cơ sở ngay dưới tên nhóm, để từng dòng cũng nói rõ model hay luật.
   const rowBasis = review.category_basis
@@ -1124,6 +2951,7 @@ function makeReviewRow(review, index) {
 
   if (state.hasTrueLabel) {
     const truthCell = document.createElement("td");
+    truthCell.className = "truth-cell";
     truthCell.appendChild(
       review.true_label === 1
         ? makeTag("Giả", "tag-fake")
@@ -1141,14 +2969,37 @@ function makeReviewRow(review, index) {
 
   const flagCell = document.createElement("td");
   flagCell.className = "flag-cell";
+
+  // Mọi review đều có cờ sao riêng (1–5), không chỉ riêng five_star. Cờ này
+  // được tạo từ rating làm tròn giống biểu đồ, nên dòng 4.4 hiện "4 sao".
+  const ratingStar = roundedStar(review.rating);
+  if (ratingStar !== null) {
+    const starFlagName = "star_" + ratingStar;
+    const starFlagLabel = ratingStar + " sao";
+    flagCell.appendChild(makeActionTag(
+      starFlagLabel,
+      "tag-flag flag-star flag-star-" + ratingStar,
+      function () { setStar(String(ratingStar)); },
+      "Lọc theo số sao: " + starFlagLabel
+    ));
+  }
+
   if (review.flags && review.flags.length > 0) {
     for (let i = 0; i < review.flags.length; i++) {
       const flagName = review.flags[i];
+      // five_star trùng nghĩa với cờ sao vừa thêm ở trên, nên bỏ bản gốc để
+      // không hiện cùng một ý hai lần trong cùng một ô.
+      if (flagName === "five_star") {
+        continue;
+      }
       const flagLabel = FLAG_INFO[flagName] || flagName;
-      flagCell.appendChild(makeTag(flagLabel, "tag-flag flag-" + flagName));
+      flagCell.appendChild(makeActionTag(
+        flagLabel,
+        "tag-flag flag-" + flagName,
+        function () { setFlag(flagName); },
+        "Lọc theo cờ: " + flagLabel
+      ));
     }
-  } else {
-    flagCell.textContent = "—";
   }
   tableRow.appendChild(flagCell);
 
@@ -1173,6 +3024,20 @@ function updateTableHeader(visibleCount, startIndex, endIndex) {
     const info = categoryInfo(state.filter);
     title.textContent = "Review: " + info.label;
     hint.textContent = info.description + ".";
+  }
+
+  const filterParts = [];
+  if (state.star !== "all") {
+    filterParts.push(state.star + " sao");
+  }
+  if (state.flag) {
+    filterParts.push("cờ: " + (FLAG_INFO[state.flag] || state.flag));
+  }
+  if (filterParts.length > 0) {
+    title.textContent = title.textContent + " · " + filterParts.join(" · ");
+  }
+  if (state.query) {
+    hint.textContent = hint.textContent + " Đang tìm “" + state.query + "”.";
   }
 
   if (visibleCount === 0) {
@@ -1314,11 +3179,20 @@ function applyPayload(payload, source) {
   state.meta = payload.meta;
   state.hasTrueLabel = source === "demo";
   state.filter = "genuine";
+  state.star = "all";
+  state.flag = null;
+  state.query = "";
   state.currentPage = 1;
 
+  const search = document.getElementById("table-search");
+  if (search) {
+    search.value = "";
+  }
   renderSummary();
   renderStarPanel();
   renderFilterChips();
+  renderStarMenu();
+  renderActiveFilters();
   renderTableHead();
   renderTable();
 }
@@ -1342,502 +3216,8 @@ function switchSource(source) {
     setPayloadVisibility(false);
   }
 
-  const showTechnical = source === "demo" && state.demoData !== null;
-  document.getElementById("technical-section").hidden = !showTechnical;
-
   updateSourceNote();
   renderBadges();
-}
-
-/* ============================================================
-   Số liệu kỹ thuật (giữ nguyên cách vẽ của bản báo cáo cũ)
-   ============================================================ */
-
-function renderKpis(testMetrics) {
-  const container = document.getElementById("kpi-grid");
-  container.innerHTML = "";
-
-  const items = [
-    ["Accuracy", testMetrics.accuracy, "Tỉ lệ đoán đúng toàn bộ", false],
-    ["Precision", testMetrics.precision, "Trong số báo Giả, bao nhiêu đúng", false],
-    ["Recall", testMetrics.recall, "Trong số Giả thật, bắt được bao nhiêu", false],
-    ["F1", testMetrics.f1, "Cân bằng Precision và Recall", true],
-    ["ROC-AUC", testMetrics.roc_auc, "Khả năng tách hai lớp", false],
-    ["PR-AUC", testMetrics.pr_auc, "Diện tích dưới đường Precision-Recall", false]
-  ];
-
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    const card = createDiv(item[3] ? "kpi is-highlight" : "kpi");
-    card.appendChild(createDiv("kpi-label", item[0]));
-    card.appendChild(createDiv("kpi-value", percentText(item[1])));
-    card.appendChild(createDiv("kpi-note", item[2]));
-    container.appendChild(card);
-  }
-}
-
-function makeConfusionCell(kind, value, label) {
-  const cell = createDiv("confusion-cell cell-" + kind);
-  cell.appendChild(createDiv("value", countText(value)));
-  cell.appendChild(createDiv("label", label));
-  return cell;
-}
-
-function renderConfusion(matrix) {
-  const container = document.getElementById("confusion-grid");
-  container.innerHTML = "";
-
-  // Hàng 1: ô trống góc trên trái + 2 tiêu đề cột (nhãn dự đoán).
-  container.appendChild(createDiv("confusion-axis", ""));
-  container.appendChild(createDiv("confusion-axis", "Dự đoán: Thật (0)"));
-  container.appendChild(createDiv("confusion-axis", "Dự đoán: Giả (1)"));
-
-  // Hàng 2: nhãn thật = Thật.
-  container.appendChild(createDiv("confusion-axis", "Thực tế: Thật (0)"));
-  container.appendChild(makeConfusionCell("tn", matrix.tn, "TN - đúng là thật"));
-  container.appendChild(makeConfusionCell("fp", matrix.fp, "FP - báo nhầm là giả"));
-
-  // Hàng 3: nhãn thật = Giả.
-  container.appendChild(createDiv("confusion-axis", "Thực tế: Giả (1)"));
-  container.appendChild(makeConfusionCell("fn", matrix.fn, "FN - bỏ sót review giả"));
-  container.appendChild(makeConfusionCell("tp", matrix.tp, "TP - đúng là giả"));
-
-  const legend = document.getElementById("confusion-legend");
-  legend.innerHTML = "";
-  const notes = [
-    "TN (True Negative): review thật, model cũng nói thật.",
-    "FP (False Positive): review thật nhưng bị gắn oan là giả.",
-    "FN (False Negative): review giả nhưng lọt qua.",
-    "TP (True Positive): review giả, model bắt đúng."
-  ];
-  for (let i = 0; i < notes.length; i++) {
-    const item = document.createElement("li");
-    item.textContent = notes[i];
-    legend.appendChild(item);
-  }
-}
-
-function niceStep(maxValue) {
-  // Chọn bước chia trục Y "đẹp": 1, 2, 5, 10, 20, 50, 100...
-  if (maxValue <= 0) {
-    return 1;
-  }
-  const rawStep = maxValue / 5;
-  const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
-  const candidates = [1, 2, 5, 10];
-  for (let i = 0; i < candidates.length; i++) {
-    if (rawStep <= candidates[i] * magnitude) {
-      return candidates[i] * magnitude;
-    }
-  }
-  return 10 * magnitude;
-}
-
-function binLabel(histogram, index) {
-  const low = histogram.bin_edges[index].toFixed(2);
-  const high = histogram.bin_edges[index + 1].toFixed(2);
-  return low + " - " + high;
-}
-
-function makeBar(x, y, width, height, fill, tooltip) {
-  const group = createSvg("g", {});
-  if (height > 0.5) {
-    group.appendChild(
-      createSvg("rect", {
-        x: x,
-        y: y,
-        width: width,
-        height: height,
-        rx: 2,
-        fill: fill
-      })
-    );
-  }
-  const title = createSvg("title", {});
-  title.textContent = tooltip;
-  group.appendChild(title);
-  return group;
-}
-
-function renderHistogram(histogram, threshold) {
-  const container = document.getElementById("histogram-chart");
-  container.innerHTML = "";
-
-  const realCounts = histogram.real_counts;
-  const fakeCounts = histogram.fake_counts;
-  const binCount = realCounts.length;
-
-  const width = 760;
-  const height = 340;
-  const left = 56;
-  const right = 16;
-  const top = 16;
-  const bottom = 48;
-  const plotWidth = width - left - right;
-  const plotHeight = height - top - bottom;
-
-  let maxValue = 0;
-  for (let i = 0; i < binCount; i++) {
-    maxValue = Math.max(maxValue, realCounts[i], fakeCounts[i]);
-  }
-  const step = niceStep(maxValue);
-  const yMax = Math.max(step, Math.ceil(maxValue / step) * step);
-
-  const svg = createSvg("svg", {
-    viewBox: "0 0 " + width + " " + height,
-    role: "img"
-  });
-
-  // Lưới ngang + nhãn trục Y.
-  const tickCount = 5;
-  for (let i = 0; i <= tickCount; i++) {
-    const value = (yMax / tickCount) * i;
-    const y = top + plotHeight - (value / yMax) * plotHeight;
-    svg.appendChild(
-      createSvg("line", {
-        x1: left,
-        y1: y,
-        x2: left + plotWidth,
-        y2: y,
-        stroke: themeColor("--chart-grid", "#d9e2ee"),
-        "stroke-width": 1
-      })
-    );
-    svg.appendChild(textNode(left - 10, y + 4, countText(Math.round(value)), "end"));
-  }
-
-  const binWidth = plotWidth / binCount;
-  const barWidth = Math.max(4, (binWidth - 8) / 2);
-
-  for (let i = 0; i < binCount; i++) {
-    const xBase = left + i * binWidth + 4;
-    const realHeight = (realCounts[i] / yMax) * plotHeight;
-    const fakeHeight = (fakeCounts[i] / yMax) * plotHeight;
-
-    svg.appendChild(
-      makeBar(
-        xBase,
-        top + plotHeight - realHeight,
-        barWidth,
-        realHeight,
-        themeColor("--chart-real", "#8fa0b6"),
-        "Thật | khoảng " + binLabel(histogram, i) + " | " + realCounts[i] + " review"
-      )
-    );
-    svg.appendChild(
-      makeBar(
-        xBase + barWidth + 2,
-        top + plotHeight - fakeHeight,
-        barWidth,
-        fakeHeight,
-        themeColor("--chart-fake", "#2563eb"),
-        "Giả | khoảng " + binLabel(histogram, i) + " | " + fakeCounts[i] + " review"
-      )
-    );
-  }
-
-  // Nhãn trục X.
-  for (let i = 0; i <= 5; i++) {
-    const value = i / 5;
-    const x = left + value * plotWidth;
-    svg.appendChild(textNode(x, top + plotHeight + 22, value.toFixed(1), "middle"));
-  }
-  svg.appendChild(
-    textNode(left + plotWidth / 2, height - 6, "Xác suất model gán nhãn Giả", "middle")
-  );
-
-  // Đường ngưỡng quyết định.
-  const thresholdX = left + threshold * plotWidth;
-  svg.appendChild(
-    createSvg("line", {
-      x1: thresholdX,
-      y1: top,
-      x2: thresholdX,
-      y2: top + plotHeight,
-      stroke: themeColor("--chart-marker", "#16202f"),
-      "stroke-width": 2,
-      "stroke-dasharray": "6 5"
-    })
-  );
-  svg.appendChild(
-    textNode(thresholdX + 6, top + 14, "ngưỡng " + threshold.toFixed(2), "start", themeColor("--chart-marker", "#16202f"))
-  );
-
-  container.appendChild(svg);
-}
-
-function renderThresholdCurve(points, bestThreshold) {
-  const container = document.getElementById("curve-chart");
-  container.innerHTML = "";
-
-  const width = 760;
-  const height = 340;
-  const left = 56;
-  const right = 16;
-  const top = 16;
-  const bottom = 48;
-  const plotWidth = width - left - right;
-  const plotHeight = height - top - bottom;
-
-  const firstThreshold = points[0].threshold;
-  const lastThreshold = points[points.length - 1].threshold;
-
-  function xOf(threshold) {
-    return left + ((threshold - firstThreshold) / (lastThreshold - firstThreshold)) * plotWidth;
-  }
-
-  function yOf(value) {
-    return top + plotHeight - value * plotHeight;
-  }
-
-  const svg = createSvg("svg", {
-    viewBox: "0 0 " + width + " " + height,
-    role: "img"
-  });
-
-  // Lưới ngang + nhãn trục Y (0.0 -> 1.0).
-  for (let i = 0; i <= 5; i++) {
-    const value = i / 5;
-    const y = yOf(value);
-    svg.appendChild(
-      createSvg("line", {
-        x1: left,
-        y1: y,
-        x2: left + plotWidth,
-        y2: y,
-        stroke: themeColor("--chart-grid", "#d9e2ee"),
-        "stroke-width": 1
-      })
-    );
-    svg.appendChild(textNode(left - 10, y + 4, value.toFixed(1), "end"));
-  }
-
-  // Ba đường: mỗi đường là một chuỗi điểm nối bằng lệnh M/L của SVG path.
-  // Chỉ dùng sắc độ của màu nhấn + xám, không dùng ba màu khác nhau để tránh
-  // biến biểu đồ thành "cầu vồng". F1 là chỉ số chính nên đậm nhất.
-  const series = [
-    ["precision", themeColor("--chart-s1", "#8fa0b6")],
-    ["recall", themeColor("--chart-s2", "#5b9bff")],
-    ["f1", themeColor("--chart-s3", "#2563eb")]
-  ];
-
-  for (let s = 0; s < series.length; s++) {
-    const fieldName = series[s][0];
-    const color = series[s][1];
-
-    let pathData = "";
-    for (let i = 0; i < points.length; i++) {
-      const x = xOf(points[i].threshold);
-      const y = yOf(points[i][fieldName]);
-      pathData = pathData + (i === 0 ? "M" : "L") + x.toFixed(2) + " " + y.toFixed(2) + " ";
-    }
-
-    svg.appendChild(
-      createSvg("path", {
-        d: pathData,
-        fill: "none",
-        stroke: color,
-        "stroke-width": 2.4,
-        "stroke-linejoin": "round"
-      })
-    );
-  }
-
-  // Nhãn trục X.
-  for (let i = 1; i <= 9; i += 2) {
-    const value = i / 10;
-    svg.appendChild(textNode(xOf(value), top + plotHeight + 22, value.toFixed(1), "middle"));
-  }
-  svg.appendChild(
-    textNode(left + plotWidth / 2, height - 6, "Ngưỡng quyết định", "middle")
-  );
-
-  // Đánh dấu ngưỡng đã chọn.
-  const markerX = xOf(bestThreshold);
-  svg.appendChild(
-    createSvg("line", {
-      x1: markerX,
-      y1: top,
-      x2: markerX,
-      y2: top + plotHeight,
-      stroke: themeColor("--chart-marker", "#16202f"),
-      "stroke-width": 2,
-      "stroke-dasharray": "6 5"
-    })
-  );
-  svg.appendChild(
-    textNode(markerX + 6, top + 14, "chọn " + bestThreshold.toFixed(2), "start", themeColor("--chart-marker", "#16202f"))
-  );
-
-  container.appendChild(svg);
-}
-
-function renderLegend(containerId, items) {
-  const container = document.getElementById(containerId);
-  container.innerHTML = "";
-
-  for (let i = 0; i < items.length; i++) {
-    const wrapper = document.createElement("span");
-    wrapper.className = "legend-item";
-
-    const swatch = document.createElement("span");
-    swatch.className = "legend-swatch";
-    swatch.style.background = items[i][1];
-
-    wrapper.appendChild(swatch);
-    wrapper.appendChild(document.createTextNode(items[i][0]));
-    container.appendChild(wrapper);
-  }
-}
-
-function renderReliability(calibration) {
-  const container = document.getElementById("reliability-chart");
-  if (!container) {
-    return;
-  }
-  container.innerHTML = "";
-
-  if (!calibration || !Array.isArray(calibration.reliability_bins)) {
-    container.textContent = "Không có dữ liệu hiệu chuẩn.";
-    return;
-  }
-
-  const bins = calibration.reliability_bins;
-
-  const width = 760;
-  const height = 340;
-  const left = 56;
-  const right = 16;
-  const top = 16;
-  const bottom = 48;
-  const plotWidth = width - left - right;
-  const plotHeight = height - top - bottom;
-
-  // Cả hai trục đều là xác suất 0..1 nên dùng chung một tỷ lệ.
-  function toX(value) {
-    return left + value * plotWidth;
-  }
-  function toY(value) {
-    return top + plotHeight - value * plotHeight;
-  }
-
-  const svg = createSvg("svg", {
-    viewBox: "0 0 " + width + " " + height,
-    role: "img"
-  });
-
-  // Lưới + nhãn trục.
-  for (let i = 0; i <= 5; i++) {
-    const value = i / 5;
-    svg.appendChild(
-      createSvg("line", {
-        x1: left,
-        y1: toY(value),
-        x2: left + plotWidth,
-        y2: toY(value),
-        stroke: themeColor("--chart-grid", "#d9e2ee"),
-        "stroke-width": 1
-      })
-    );
-    svg.appendChild(textNode(left - 10, toY(value) + 4, value.toFixed(1), "end"));
-    svg.appendChild(
-      textNode(toX(value), top + plotHeight + 22, value.toFixed(1), "middle")
-    );
-  }
-
-  // Đường chéo: nếu xác suất hoàn hảo thì điểm nằm đúng trên đường này.
-  svg.appendChild(
-    createSvg("line", {
-      x1: toX(0),
-      y1: toY(0),
-      x2: toX(1),
-      y2: toY(1),
-      stroke: themeColor("--chart-real", "#8fa0b6"),
-      "stroke-width": 2,
-      "stroke-dasharray": "6 5"
-    })
-  );
-
-  // Mỗi điểm là một khoảng xác suất. Bán kính theo số review trong khoảng
-  // để khoảng đông review được nhìn thấy rõ hơn.
-  let maxCount = 1;
-  for (let i = 0; i < bins.length; i++) {
-    maxCount = Math.max(maxCount, bins[i].count);
-  }
-
-  for (let i = 0; i < bins.length; i++) {
-    const bin = bins[i];
-    if (bin.count === 0 || bin.mean_predicted === null) {
-      continue;
-    }
-
-    const radius = 4 + (bin.count / maxCount) * 8;
-    const circle = createSvg("circle", {
-      cx: toX(bin.mean_predicted),
-      cy: toY(bin.observed_fake_rate),
-      r: radius,
-      fill: themeColor("--chart-band", "rgba(37, 99, 235, 0.35)"),
-      stroke: themeColor("--chart-s3", "#2563eb"),
-      "stroke-width": 1.5
-    });
-
-    const title = createSvg("title", {});
-    title.textContent =
-      "Khoảng " + bin.low.toFixed(1) + "–" + bin.high.toFixed(1) +
-      " | dự đoán " + bin.mean_predicted.toFixed(3) +
-      " | thực tế " + bin.observed_fake_rate.toFixed(3) +
-      " | " + bin.count + " review";
-    circle.appendChild(title);
-    svg.appendChild(circle);
-  }
-
-  svg.appendChild(
-    textNode(left + plotWidth / 2, height - 6, "Xác suất model dự đoán", "middle")
-  );
-  container.appendChild(svg);
-
-  const summary = document.getElementById("reliability-summary");
-  if (summary) {
-    summary.textContent =
-      "Brier score: " + calibration.brier_before + " → " + calibration.brier_after +
-      " (càng nhỏ càng tốt) · Sai số hiệu chuẩn ECE: " +
-      calibration.ece_before + " → " + calibration.ece_after +
-      ". Điểm càng gần đường chéo thì xác suất càng đáng tin.";
-  }
-}
-
-function renderTechnical(technical, meta) {
-  if (!technical) {
-    return;
-  }
-
-  state.technical = { data: technical, meta: meta };
-
-  const testMetrics = technical.metrics.test;
-  renderKpis(testMetrics);
-  renderConfusion(testMetrics.confusion_matrix);
-
-  renderLegend("histogram-legend", [
-    ["Nhãn thật: Thật", themeColor("--chart-real", "#8fa0b6")],
-    ["Nhãn thật: Giả", themeColor("--chart-fake", "#2563eb")],
-    ["Ngưỡng quyết định", themeColor("--chart-marker", "#16202f")]
-  ]);
-  renderHistogram(technical.histogram, meta.threshold);
-
-  renderLegend("curve-legend", [
-    ["Precision", themeColor("--chart-s1", "#8fa0b6")],
-    ["Recall", themeColor("--chart-s2", "#5b9bff")],
-    ["F1", themeColor("--chart-s3", "#2563eb")],
-    ["Ngưỡng được chọn", themeColor("--chart-marker", "#16202f")]
-  ]);
-  renderThresholdCurve(technical.threshold_curve, meta.threshold);
-
-  // Hiệu chuẩn xác suất: bằng chứng cho thấy con số hiển thị đáng tin.
-  renderLegend("reliability-legend", [
-    ["Hiệu chuẩn hoàn hảo", themeColor("--chart-real", "#8fa0b6")],
-    ["Thực tế quan sát", themeColor("--chart-s3", "#2563eb")]
-  ]);
-  renderReliability(technical.metrics.calibration);
 }
 
 /* ============================================================
@@ -2243,8 +3623,9 @@ async function runUploadAnalysis(csvText, fileName) {
 
   const phases = uploadPhases(translateRows);
   let phaseIndex = 0;
+  const numberStarts = captureNumberStarts();
+  let uploadRushPlan = {};
   showLoader(phases[0][0], phases[0][1], {
-    progress: null,
     limitSeconds: translateRows ? translateSeconds : 0
   });
 
@@ -2254,11 +3635,14 @@ async function runUploadAnalysis(csvText, fileName) {
   }, UPLOAD_PHASE_MS);
 
   const runButton = document.getElementById("editor-run");
-  const replayButton = document.getElementById("replay-button");
+  const headerRun = document.getElementById("train-button");
   runButton.disabled = true;
-  // Ẩn nút chạy lại trong lúc chờ API: bấm vào sẽ khởi động chuỗi demo song
-  // song và tắt màn hình chờ khi request này còn đang bay.
-  replayButton.hidden = true;
+  // Khoá nút chạy của header trong lúc chờ API thay vì ẩn đi: bấm vào lúc này
+  // sẽ khởi động chuỗi demo song song, nhưng ẩn nút sẽ làm dãy nút đầu trang
+  // co lại và đẩy công tắc nền tối sang trái.
+  if (headerRun) {
+    headerRun.disabled = true;
+  }
   setEditorStatus("");
 
   try {
@@ -2274,6 +3658,9 @@ async function runUploadAnalysis(csvText, fileName) {
 
     const data = await response.json();
     window.clearInterval(phaseTimer);
+    if (loaderState.cancelled) {
+      throw CANCEL_SENTINEL;
+    }
 
     if (!response.ok) {
       setEditorStatus(data.error || "API trả về lỗi.", true);
@@ -2283,6 +3670,7 @@ async function runUploadAnalysis(csvText, fileName) {
     state.uploadData = data;
     state.uploadFileName = fileName;
     switchSource("upload");
+    loading_skeleton(true, { starts: numberStarts });
 
     setEditorStatus(
       "Xong: " + countText(data.meta.analyzed_rows) + " dòng trong " +
@@ -2295,7 +3683,7 @@ async function runUploadAnalysis(csvText, fileName) {
       "Hoàn tất phân tích",
       "Đã xếp nhóm " + countText(data.meta.analyzed_rows) + " dòng."
     );
-    setLoaderProgress(100);
+      uploadRushPlan = collectSkeletonRushPlan();
     await pause(UPLOAD_RESULT_HOLD_MS);
 
     document.getElementById("summary-card").scrollIntoView({
@@ -2303,16 +3691,23 @@ async function runUploadAnalysis(csvText, fileName) {
       block: "start"
     });
   } catch (error) {
+    if (error === CANCEL_SENTINEL) {
+      setEditorStatus("Đã huỷ quá trình. Dữ liệu preview giữ nguyên.");
+      return;
+    }
     setEditorStatus(
-      "Không gọi được API. Hãy chạy: python MaNguon/api_server.py rồi mở " +
+      "Không gọi được API. Hãy chạy: python MaNGuon/api_server.py rồi mở " +
       "http://127.0.0.1:8000/ (không double-click file).",
       true
     );
   } finally {
     window.clearInterval(phaseTimer);
     hideLoader();
+    applyRushPlan(uploadRushPlan);
     runButton.disabled = false;
-    replayButton.hidden = false;
+    if (headerRun) {
+      headerRun.disabled = false;
+    }
   }
 }
 
@@ -2686,6 +4081,94 @@ async function handlePredict() {
 }
 
 /* ============================================================
+   Tương tác sống động: sóng nước khi bấm chỗ trống
+   ============================================================ */
+
+const liveEffects = { lastRippleAt: 0, active: 0, max: 24 };
+
+// Các điều khiển đã tự có phản hồi nén lò xo qua CSS :active. Chỉ tạo ripple
+// khi bấm vào nền trống, và bỏ qua chữ đang chọn để không cản copy/paste.
+function isLiveControl(target) {
+  return Boolean(target && target.closest &&
+    target.closest(
+      "button, a, input, textarea, select, label, summary, " +
+      "[role='button'], .category-card, .kpi, .preview-card"
+    ));
+}
+
+function isPlainTextTarget(target) {
+  return Boolean(
+    target && target.children.length === 0 &&
+    target.textContent && target.textContent.trim()
+  );
+}
+
+function trackLiveEffect(node) {
+  liveEffects.active++;
+  node.addEventListener("animationend", function () {
+    node.remove();
+    liveEffects.active = Math.max(0, liveEffects.active - 1);
+  }, { once: true });
+}
+
+function spawnLiveRipple(event) {
+  if (reducedMotionEnabled()) {
+    return;
+  }
+  const now = Date.now();
+  if (now - liveEffects.lastRippleAt < 70 ||
+      liveEffects.active >= liveEffects.max) {
+    return;
+  }
+  liveEffects.lastRippleAt = now;
+
+  const x = event.clientX;
+  const y = event.clientY;
+  const ripple = document.createElement("span");
+  ripple.className = "live-ripple";
+  ripple.style.setProperty("--x", x + "px");
+  ripple.style.setProperty("--y", y + "px");
+  document.body.appendChild(ripple);
+  trackLiveEffect(ripple);
+
+  const sparks = 5;
+  for (let i = 0; i < sparks; i++) {
+    const angle = (Math.PI * 2 * i) / sparks + (Math.random() - 0.5) * 0.5;
+    const distance = 18 + Math.random() * 16;
+    const spark = document.createElement("span");
+    spark.className = "live-particle";
+    spark.style.setProperty("--x", x + "px");
+    spark.style.setProperty("--y", y + "px");
+    spark.style.setProperty("--dx", Math.cos(angle) * distance + "px");
+    spark.style.setProperty("--dy", Math.sin(angle) * distance + "px");
+    document.body.appendChild(spark);
+    trackLiveEffect(spark);
+  }
+}
+
+function bindLiveInteractions() {
+  document.addEventListener("pointerdown", function (event) {
+    if (!event.isPrimary || event.button !== 0) {
+      return;
+    }
+    if (isLiveControl(event.target) || isPlainTextTarget(event.target)) {
+      return;
+    }
+    spawnLiveRipple(event);
+  });
+}
+
+function bindTableSearch() {
+  const input = document.getElementById("table-search");
+  if (!input) {
+    return;
+  }
+  input.addEventListener("input", function () {
+    setQuery(input.value);
+  });
+}
+
+/* ============================================================
    Phân trang
    ============================================================ */
 
@@ -2861,6 +4344,217 @@ function startDbHealthPolling() {
    Khởi động
    ============================================================ */
 
+/* ============================================================
+   Bảng demo: mở bằng nút, lọc và nạp dần khi cuộn
+   ============================================================ */
+
+function previewReviewValues(review) {
+  return [
+    review.row_index,
+    shortText(review.text, 110),
+    review.rating,
+    review.true_label === 1 ? "Giả" : "Thật",
+    percentText(review.prob_fake),
+    categoryInfo(review.category).label
+  ];
+}
+
+function filteredDemoReviews() {
+  const query = foldForSearch(demoPreview.query).text;
+  return demoPreview.reviews.filter(function (review) {
+    if (demoPreview.star !== "all" &&
+        Math.round(Number(review.rating) || 0) !== Number(demoPreview.star)) {
+      return false;
+    }
+    if (demoPreview.label !== "all") {
+      const isFake = review.true_label === 1;
+      if ((demoPreview.label === "fake") !== isFake) {
+        return false;
+      }
+    }
+    if (demoPreview.category !== "all" && review.category !== demoPreview.category) {
+      return false;
+    }
+    if (query && foldForSearch(review.text).text.indexOf(query) === -1) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function renderDemoPreviewTable() {
+  const body = document.getElementById("preview-body");
+  const wrap = document.getElementById("preview-table-wrap");
+  if (!body || !wrap) {
+    return;
+  }
+
+  const matched = filteredDemoReviews();
+  const rows = matched.map(previewReviewValues);
+  const count = document.getElementById("preview-filter-count");
+  if (count) {
+    const hasFilter = Boolean(demoPreview.query) || demoPreview.star !== "all" ||
+      demoPreview.label !== "all" || demoPreview.category !== "all";
+    count.textContent = "Khớp " + countText(rows.length) + " / " +
+      countText(demoPreview.reviews.length) + " review" +
+      (hasFilter ? " · đang lọc" : "");
+  }
+
+  bindInfiniteTable(body, wrap, {
+    rows: rows,
+    query: demoPreview.query,
+    status: document.getElementById("preview-table-status"),
+    totalText: countText(rows.length) + " review khớp"
+  });
+}
+
+function syncPreviewFilterChips() {
+  const chips = document.querySelectorAll("#preview-filter-chips .preview-filter-chip");
+  for (let i = 0; i < chips.length; i++) {
+    const chip = chips[i];
+    const active = demoPreview[chip.dataset.filterKey] === chip.dataset.filterValue;
+    chip.classList.toggle("is-active", active);
+    chip.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+}
+
+function buildPreviewFilterChips() {
+  const host = document.getElementById("preview-filter-chips");
+  if (!host) {
+    return;
+  }
+  host.replaceChildren();
+
+  const categoryItems = [["all", "Tất cả"]].concat(CATEGORY_ORDER.map(function (id) {
+    return [id, categoryInfo(id).label];
+  }));
+  const groups = [
+    { key: "star", label: "Sao", items: [
+      ["all", "Tất cả"], ["1", "1"], ["2", "2"], ["3", "3"], ["4", "4"], ["5", "5"]
+    ]},
+    { key: "label", label: "Nhãn", items: [
+      ["all", "Tất cả"], ["real", "Thật"], ["fake", "Giả"]
+    ]},
+    { key: "category", label: "Nhóm", items: categoryItems }
+  ];
+
+  groups.forEach(function (group) {
+    const wrap = createDiv("preview-filter-group");
+    wrap.appendChild(createDiv("preview-filter-group-label", group.label));
+    group.items.forEach(function (item) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "preview-filter-chip";
+      chip.textContent = item[1];
+      chip.dataset.filterKey = group.key;
+      chip.dataset.filterValue = item[0];
+      chip.addEventListener("click", function () {
+        demoPreview[group.key] = item[0];
+        syncPreviewFilterChips();
+        if (demoPreview.open) {
+          renderDemoPreviewTable();
+        }
+      });
+      wrap.appendChild(chip);
+    });
+    host.appendChild(wrap);
+  });
+  syncPreviewFilterChips();
+}
+
+function toggleDemoPreview() {
+  const button = document.getElementById("preview-toggle");
+  const panel = document.getElementById("preview-panel");
+  if (!button || !panel) {
+    return;
+  }
+  demoPreview.open = !demoPreview.open;
+  panel.hidden = !demoPreview.open;
+  button.setAttribute("aria-expanded", demoPreview.open ? "true" : "false");
+  button.textContent = demoPreview.open ? "Ẩn preview dữ liệu" : "Xem preview dữ liệu";
+  if (demoPreview.open && demoPreview.reviews.length > 0) {
+    renderDemoPreviewTable();
+  }
+}
+
+function bindDemoPreview() {
+  const toggle = document.getElementById("preview-toggle");
+  const search = document.getElementById("preview-search");
+  const reset = document.getElementById("preview-filter-reset");
+
+  if (toggle) {
+    toggle.addEventListener("click", toggleDemoPreview);
+  }
+  if (search) {
+    let debounceId = 0;
+    search.addEventListener("input", function () {
+      window.clearTimeout(debounceId);
+      debounceId = window.setTimeout(function () {
+        demoPreview.query = search.value.trim();
+        if (demoPreview.open) {
+          renderDemoPreviewTable();
+        }
+      }, 150);
+    });
+  }
+  if (reset) {
+    reset.addEventListener("click", function () {
+      demoPreview.query = "";
+      demoPreview.star = "all";
+      demoPreview.label = "all";
+      demoPreview.category = "all";
+      if (search) {
+        search.value = "";
+      }
+      syncPreviewFilterChips();
+      if (demoPreview.open) {
+        renderDemoPreviewTable();
+      }
+    });
+  }
+  buildPreviewFilterChips();
+}
+
+// Mở trang chỉ xem trước dữ liệu: nạp data_reviews.js và để đó, bảng chỉ dựng
+// khi người xem bấm nút. Không gọi runProcessingSequence() ở đây.
+async function preparePreview() {
+  const count = document.getElementById("preview-count");
+  const status = document.getElementById("preview-status");
+  if (status) {
+    status.textContent = "Đang nạp review từ DuLieuDemo/data_reviews.js...";
+  }
+
+  const reviews = await ensureDemoReviews();
+  if (!Array.isArray(reviews) || reviews.length === 0) {
+    if (status) {
+      status.textContent = "Không nạp được dữ liệu. Hãy chạy python MaNguon\\export_web_data.py";
+    }
+    return false;
+  }
+
+  demoPreview.reviews = reviews;
+  if (state.demoData) {
+    state.demoData.reviews = reviews;
+  }
+  if (count) {
+    // Chỉ phần số nằm trong span riêng: loading_skeleton() và hiệu ứng tăng
+    // tốc vì thế không làm mờ hay làm nhấp nháy chữ "review".
+    const number = document.createElement("span");
+    number.className = "preview-count-number";
+    number.textContent = countText(reviews.length);
+    count.replaceChildren(number, document.createTextNode(" review"));
+  }
+
+  if (status) {
+    status.textContent = "Đã nạp " + countText(reviews.length) +
+      " review. Bấm “Xem preview dữ liệu” để mở bảng.";
+  }
+  if (demoPreview.open) {
+    renderDemoPreviewTable();
+  }
+  return true;
+}
+
 function showMissingDataError() {
   const main = document.getElementById("app");
 
@@ -2925,6 +4619,7 @@ document.addEventListener("DOMContentLoaded", function () {
   // Chế độ sáng/tối phải áp dụng trước khi vẽ bất cứ thứ gì, để biểu đồ
   // lấy đúng bảng màu ngay từ lần vẽ đầu tiên.
   initTheme();
+  initMenu();
 
   // Đèn báo CSDL chạy độc lập với dữ liệu demo, nên bật trước mọi thứ khác.
   startDbHealthPolling();
@@ -2944,11 +4639,35 @@ document.addEventListener("DOMContentLoaded", function () {
   document.getElementById("csv-file").addEventListener("change", loadFileIntoEditor);
   bindEditor();
   bindSaveDialog();
-  document.getElementById("replay-button").addEventListener("click", function () {
-    runProcessingSequence();
-  });
 
+  const trainButtons = [
+    document.getElementById("train-button"),
+    document.getElementById("preview-run-button"),
+    document.getElementById("result-rerun")
+  ];
+  for (let i = 0; i < trainButtons.length; i++) {
+    if (trainButtons[i]) {
+      trainButtons[i].addEventListener("click", runProcessingSequence);
+    }
+  }
+  const resultClose = document.getElementById("result-close");
+  if (resultClose) {
+    resultClose.addEventListener("click", closeResultPanel);
+  }
+  const loaderCancel = document.getElementById("loader-cancel");
+  if (loaderCancel) {
+    loaderCancel.addEventListener("click", cancelProcessing);
+  }
+
+  bindDemoPreview();
   bindPagination();
+  bindTableSearch();
+  bindStarDropdown();
+  const revealButton = document.getElementById("reveal-data-button");
+  if (revealButton) {
+    revealButton.addEventListener("click", revealPendingData);
+  }
+  bindLiveInteractions();
 
   const metaData = window.WEB_DATA_META;
 
@@ -2961,9 +4680,11 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   applyMetaSettings(metaData);
+  // Dựng lại chip nhóm sau khi đã đồng bộ CATEGORY_ORDER với file meta.
+  buildPreviewFilterChips();
 
-  // Ghép payload với danh sách review rỗng; review thật được nạp trong
-  // runProcessingSequence() để màn hình chờ có việc thật mà báo tiến độ.
+  // Ghép payload với danh sách review rỗng; preparePreview() nạp review thật
+  // ngay để hiện bảng, còn runProcessingSequence() chỉ chạy khi bấm nút.
   state.demoData = {
     meta: metaData.meta,
     summary: metaData.summary,
@@ -2980,6 +4701,15 @@ document.addEventListener("DOMContentLoaded", function () {
   ];
   document.getElementById("footer-meta").textContent = footerParts.join(" - ");
 
-  // Không vẽ kết quả ngay: chạy tuần tự dưới màn hình chờ rồi mới hiện.
-  runProcessingSequence();
+  // Mở trang ở chế độ xem trước, không tự chạy mô hình và không tự hiện số.
+  // Sau khi dữ liệu demo nạp xong, 5 thẻ nhóm + thanh 5 sao đứng yên ở 0;
+  // người xem bấm "Hiện lại dữ liệu" thì mới chạy delay + tăng số.
+  preparePreview().then(function (loaded) {
+    if (loaded) {
+      preparePendingReveal();
+    } else {
+      // Không có dữ liệu thì vẫn cho các thẻ đang hiện xuất hiện gọn gàng.
+      playCardEntrance();
+    }
+  });
 });

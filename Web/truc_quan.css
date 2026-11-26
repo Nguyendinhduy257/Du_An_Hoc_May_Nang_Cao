@@ -1,0 +1,50 @@
+/*
+  Đường dẫn: Du_An_Hoc_May_Nang_Cao\Web\truc_quan.css
+  Chỉ chứa bố cục riêng của trang trực quan hóa. Màu, viền, bóng và kiểu
+  biểu đồ vẫn lấy từ style.css để hai trang không thể lệch tông.
+*/
+
+.viz-page {
+  min-height: 100vh;
+}
+
+.viz-header {
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.viz-body {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 24px 32px;
+}
+
+.viz-card {
+  padding-top: 20px;
+  padding-bottom: 20px;
+}
+
+.viz-card .section-heading {
+  margin-bottom: 12px;
+}
+
+/* Biểu đồ SVG được tạo với viewBox cố định, chỉ cần giới hạn chiều cao để
+   trang không bị quá dài trên màn hình laptop. */
+.viz-card .chart-box svg {
+  max-height: 420px;
+}
+
+#viz-footer {
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+@media (max-width: 640px) {
+  .viz-header {
+    flex-direction: column;
+  }
+
+  .viz-body {
+    padding: 0 14px 24px;
+  }
+}

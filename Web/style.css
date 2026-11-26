@@ -119,6 +119,14 @@
   --chart-s3: #2563eb;
   --chart-band: rgba(37, 99, 235, 0.35);
 
+  /* Lớp phủ thinking đủ mờ để nhìn rõ giao diện phía sau; bản result đậm hơn
+     để bảng kết quả không bị chữ nền làm rối. */
+  --overlay: rgba(230, 236, 244, 0.62);
+  --overlay-strong: rgba(230, 236, 244, 0.92);
+
+  /* Chiều rộng cột menu dọc. Giá trị thu gọn được đổi qua data-sidebar trên <html>. */
+  --sidebar-width: 224px;
+
   --radius: 14px;
   /* Đổ bóng rất nhẹ: viền 1px mới là thứ tách card khỏi nền, không phải bóng. */
   --shadow: 0 1px 2px rgba(22, 32, 47, 0.06), 0 1px 3px rgba(22, 32, 47, 0.08);
@@ -219,8 +227,15 @@
   --chart-s3: #7caeff;
   --chart-band: rgba(124, 174, 255, 0.3);
 
+  --overlay: rgba(11, 18, 32, 0.72);
+  --overlay-strong: rgba(11, 18, 32, 0.94);
+
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.5);
   --shadow-lift: 0 8px 20px rgba(0, 0, 0, 0.45);
+}
+
+:root[data-sidebar="collapsed"] {
+  --sidebar-width: 68px;
 }
 
 /* Ở nền tối, 5 màu nhóm đều là màu sáng nên chữ trên huy hiệu phải là chữ tối. */
@@ -238,12 +253,16 @@
 
 body {
   margin: 0;
+  /* Toàn bộ nội dung nằm sau cột menu dọc; đổi data-sidebar là cả trang tự
+     dời theo, không phải sửa từng header/main/footer. */
+  padding-left: var(--sidebar-width);
   font-family: "Segoe UI", system-ui, -apple-system, Arial, sans-serif;
   color: var(--ink);
   line-height: 1.55;
   /* Nền phẳng: bỏ hai vệt gradient màu, vì chúng làm nền không còn trung tính
      và tranh mắt với số liệu. */
   background: var(--bg);
+  transition: padding-left 0.22s ease;
 }
 
 /* Viền focus thống nhất cho cả bàn phím và chuột, dùng đúng màu nhấn. */
@@ -338,6 +357,181 @@ code {
   font-size: 14px;
   line-height: 1;
   color: var(--accent-text);
+}
+
+/* ---------- Thanh menu dọc bên trái ---------- */
+/* Sidebar là cột cố định, mở mặc định. Script đầu trang đọc localStorage rồi
+   gán data-sidebar lên <html>, nên trang không bị nháy khi tải lại. */
+.menu-sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 70;
+  width: var(--sidebar-width);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 10px;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  transition: width 0.22s ease;
+}
+
+.menu-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 0 8px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.menu-brand-mark {
+  flex: 0 0 30px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.menu-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.menu-item:hover {
+  border-color: var(--line);
+  background: var(--surface-2);
+}
+
+/* Mục đang dùng: nền nhấn + viền accent + vạch ở mép trái. Vạch này vẫn hiện
+   khi sidebar thu gọn chỉ còn icon, nên nhận diện được mọi trạng thái. */
+.menu-item.is-active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.menu-item.is-active svg,
+.menu-item.is-active .menu-item-icon {
+  color: var(--accent-text);
+}
+
+.menu-item svg,
+.menu-item-icon {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--accent-text);
+}
+
+.menu-item-icon {
+  display: grid;
+  place-items: center;
+  stroke: none;
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* Nút thu gọn nằm giữa chiều cao cột, sau nhóm mục menu. */
+.menu-toggle {
+  margin: auto 0;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.menu-toggle:hover {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.menu-toggle svg {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.menu-divider {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--line);
+}
+
+:root[data-sidebar="collapsed"] .menu-item-text,
+:root[data-sidebar="collapsed"] .menu-brand-text,
+:root[data-sidebar="collapsed"] .menu-toggle-text {
+  display: none;
+}
+
+:root[data-sidebar="collapsed"] .menu-sidebar {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+:root[data-sidebar="collapsed"] .menu-item,
+:root[data-sidebar="collapsed"] .menu-toggle {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 /* ---------- Đèn báo kết nối CSDL ---------- */
@@ -452,6 +646,91 @@ main {
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+/* Highlight chỉ áp cho các hàng của bảng "Review hữu ích" đã lọc. Các thẻ
+   kết quả phân loại (.category-card, .kpi) giữ nguyên hover cũ. Viền dày hai
+   bên được vẽ bằng box-shadow inset ngay trên ô đầu/cuối: nằm trọn trong ô nên
+   khung cuộn của bảng không thể cắt mất một phần viền. */
+#table-body tr {
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+#table-body td {
+  transition: box-shadow 0.25s ease;
+}
+
+#table-body tr:hover {
+  position: relative;
+  z-index: 2;
+  transform: scale(1.015) translateY(-3px);
+  box-shadow:
+    inset 0 0 0 1px var(--accent-line),
+    var(--shadow-lift);
+}
+
+/* Bo góc theo chuẩn 10px ở hai đầu hàng, kể cả khi bảng dùng border-collapse. */
+#table-body tr:hover td:first-child {
+  border-top-left-radius: 10px;
+  border-bottom-left-radius: 10px;
+  box-shadow: inset 4px 0 0 var(--accent);
+}
+
+#table-body tr:hover td:last-child {
+  border-top-right-radius: 10px;
+  border-bottom-right-radius: 10px;
+  box-shadow: inset -4px 0 0 var(--accent);
+}
+
+/* Hiệu ứng xuất hiện lần lượt khi tải lại trang. JS gán animation-delay từng
+   thẻ (80ms) rồi bỏ class ở animationend; dùng backwards để thẻ không nháy
+   trước khi tới lượt. */
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+main > .card.is-entering,
+main .category-card.is-entering {
+  animation: card-enter 420ms ease;
+  animation-fill-mode: backwards;
+}
+
+/* Nhịp thở khi trang đứng yên: chỉ một lớp viền mờ đổi opacity, không đổi
+   box-shadow hay layout, nên vẫn mượt trên điện thoại. */
+.card {
+  position: relative;
+}
+
+.card::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px var(--accent-line), 0 0 18px var(--accent-ring);
+  opacity: 0.08;
+  animation: ambient-breathe 7s ease-in-out infinite;
+}
+
+main > .card:nth-child(3n+2)::after {
+  animation-delay: -2.3s;
+}
+
+main > .card:nth-child(3n)::after {
+  animation-delay: -4.6s;
+}
+
+@keyframes ambient-breathe {
+  0%, 100% { opacity: 0.06; }
+  50% { opacity: 0.16; }
 }
 
 .card h2 {
@@ -570,6 +849,20 @@ main {
 }
 
 /* ---------- 5 thẻ nhóm ---------- */
+.summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Chiều rộng cố định để đổi chữ giữa "Hiện lại dữ liệu" và "Đã hiện dữ liệu"
+   không làm xô hộp số review hữu ích bên cạnh. */
+.reveal-button {
+  min-width: 134px;
+  white-space: nowrap;
+}
+
 .useful-pill {
   padding: 10px 18px;
   border: 1px solid var(--real-line);
@@ -890,12 +1183,192 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
+/* Hai cột progress bar của biểu đồ là nút lọc. Nền trong suốt để vẫn nhìn như
+   thanh cũ; chỉ đổi nền/viền khi hover hoặc đang active. */
+.star-meter-button {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  transition: transform 0.18s cubic-bezier(.2, .9, .25, 1.3),
+              background 0.15s ease, border-color 0.15s ease;
+}
+
+.star-meter-button:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  background: var(--surface-2);
+}
+
+.star-meter-button.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.star-meter-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.star-meter-fill {
+  transition: width 0.45s cubic-bezier(.2, .8, .2, 1), opacity 0.15s ease;
+}
+
+.star-meter-button:hover:not(:disabled) .star-meter-fill {
+  opacity: 0.82;
+}
+
+.star-row.is-star-selected .star-rating {
+  color: var(--accent-text);
+}
+
+.star-meter-button.is-pulsing .star-meter-track {
+  animation: meter-pulse 320ms ease-out;
+}
+
+@keyframes meter-pulse {
+  0% { transform: scaleX(1); }
+  45% { transform: scaleX(1.025); }
+  100% { transform: scaleX(1); }
+}
+
 /* ---------- Bộ lọc ---------- */
 .filter-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 10px;
+}
+
+/* Hàng công cụ của bảng review: ô tìm và chip sao nằm cùng dòng khi đủ chỗ. */
+.filter-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+#table-search {
+  flex: 1 1 240px;
+  min-width: 180px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+#table-search::placeholder {
+  color: var(--muted);
+}
+
+#table-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+/* Dropdown sao nằm cùng hàng với chip nhóm. Trigger dùng lại .filter-chip để
+   đồng bộ hình dáng; menu là danh sách nút, mở/đóng bằng JS. */
+.star-dropdown {
+  position: relative;
+}
+
+.star-dropdown-trigger {
+  gap: 8px;
+}
+
+.star-dropdown-caret {
+  font-size: 10px;
+  line-height: 1;
+  transition: transform 0.18s ease;
+}
+
+.star-dropdown.is-open .star-dropdown-caret {
+  transform: rotate(180deg);
+}
+
+.star-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lift);
+}
+
+.star-dropdown-menu[hidden] {
+  display: none;
+}
+
+.star-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.15s cubic-bezier(.2, .9, .25, 1.3),
+              background 0.15s ease;
+}
+
+.star-option:hover {
+  background: var(--surface-2);
+}
+
+.star-option.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.active-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.active-filters:empty {
+  display: none;
+}
+
+.active-filter-chip {
+  padding: 5px 10px;
+  border: 1px dashed var(--accent-line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: transform 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.active-filter-chip:hover {
+  color: var(--accent-text);
+  border-color: var(--accent);
 }
 
 .filter-chip {
@@ -946,6 +1419,16 @@ main {
   overflow-x: auto;
 }
 
+/* overflow-x:auto biến trình duyệt thành overflow-y:hidden, làm cất mất phần
+   hàng phóng to + bóng khi hover. Đệm thêm bên trong rồi dùng margin âm cùng
+   kích thước: khung có chỗ cho hiệu ứng nhưng bố cục và chiều rộng bảng không
+   đổi. Đáy dày hơn vì bóng --shadow-lift nhích xuống 6px, mờ thêm 16px. */
+#table-card .table-wrap {
+  padding: 16px 16px 22px;
+  margin: -16px -16px -22px;
+  overflow-x: auto;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -987,6 +1470,26 @@ tbody tr.is-suspect td:first-child {
 
 tbody tr.is-suspect:hover td {
   background: var(--suspect-bg-hover);
+}
+
+/* Cột nhãn thật/giả + đúng/sai: dãn dòng vừa phải, căn giữa theo chiều dọc
+   để hai tag không dính nhau khi bảng có nhiều dòng chữ ở cột review. */
+.truth-cell {
+  vertical-align: middle;
+  line-height: 1.7;
+  padding-block: 16px;
+  min-width: 118px;
+  white-space: nowrap;
+}
+
+.truth-cell .tag {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+}
+
+.truth-cell .tag + .tag {
+  margin-left: 6px;
 }
 
 .text-cell {
@@ -1117,33 +1620,91 @@ tbody tr.is-suspect:hover td {
   color: var(--fake-ink);
 }
 
+/* Cờ trong bảng là pill bo tròn, nền mờ và viền mảnh theo từng tông. Cờ xếp
+   sát nhau bằng flex/gap nên ô không còn cảm giác các hình màu vuông cứng. */
+.flag-cell {
+  white-space: normal;
+}
+
+.flag-cell .tag,
+.flag-cell .tag-button {
+  margin: 0 4px 4px 0;
+}
+
 .tag-flag {
-  margin-bottom: 4px;
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 999px;
   color: var(--muted);
+  font-weight: 500;
+  padding-block: 3px;
+}
+
+.tag-flag.flag-star {
+  background: color-mix(in srgb, var(--chip-violet-bg) 62%, transparent);
+  border-color: color-mix(in srgb, var(--violet-ink) 18%, transparent);
+  color: var(--violet-ink);
 }
 
 /* Cờ "không đáng tin" phải nổi bật hơn các cờ phụ, vì nó làm kết luận mất giá trị. */
 .tag-flag.flag-low_confidence {
-  background: var(--fake-soft);
+  background: color-mix(in srgb, var(--fake-soft) 62%, transparent);
+  border-color: color-mix(in srgb, var(--fake-ink) 22%, transparent);
   color: var(--fake-ink);
 }
 
 .tag-flag.flag-has_link {
-  background: var(--chip-warn-bg);
+  background: color-mix(in srgb, var(--chip-warn-bg) 62%, transparent);
+  border-color: color-mix(in srgb, var(--warn-ink) 22%, transparent);
   color: var(--warn-ink);
-}
-
-.tag-flag.flag-five_star {
-  background: var(--chip-violet-bg);
-  color: var(--violet-ink);
 }
 
 /* Hai cờ do bước dịch máy: dùng tông vàng để khác lỗi thật (đỏ). */
 .tag-flag.flag-translation_borderline,
 .tag-flag.flag-translation_inconsistent {
-  background: var(--chip-warn-bg);
+  background: color-mix(in srgb, var(--chip-warn-bg) 62%, transparent);
+  border-color: color-mix(in srgb, var(--warn-ink) 22%, transparent);
   color: var(--warn-ink);
+}
+
+/* Tag trong dòng bảng thành nút bấm được, nhưng giữ nguyên hình dáng cũ. */
+.tag-button {
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+  transition: transform 0.15s cubic-bezier(.2, .9, .25, 1.3),
+              filter 0.15s ease;
+}
+
+.tag-button:hover {
+  filter: brightness(1.06);
+}
+
+/* .tag-button đặt border:0 ở trên; cờ trong bảng cần giữ viền mảnh của pill. */
+.flag-cell .tag-flag {
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 999px;
+}
+
+.flag-cell .tag-flag.flag-star {
+  border-color: color-mix(in srgb, var(--violet-ink) 18%, transparent);
+}
+
+.flag-cell .tag-flag.flag-low_confidence {
+  border-color: color-mix(in srgb, var(--fake-ink) 22%, transparent);
+}
+
+.flag-cell .tag-flag.flag-has_link,
+.flag-cell .tag-flag.flag-translation_borderline,
+.flag-cell .tag-flag.flag-translation_inconsistent {
+  border-color: color-mix(in srgb, var(--warn-ink) 22%, transparent);
+}
+
+.star-row-tag {
+  width: fit-content;
+  padding: 0;
+  background: transparent;
+  line-height: 1;
 }
 
 /* Lý do xếp nhóm: mặc định thu gọn để bảng không bị dài. */
@@ -1627,18 +2188,38 @@ tbody tr.is-unreliable td:first-child {
 }
 
 /* ---------- Màn hình chờ (Gooey) ---------- */
-/* Lớp phủ kín trang, hiện ngay khi mở và chỉ tắt khi app.js chạy xong quá
-   trình. Vì sao phủ kín: người xem phải thấy "hệ thống đang xử lý" thay vì
-   kết quả demo đã có sẵn ngay từ giây đầu. */
+/* Lớp phủ thinking chỉ đủ mờ để tạo cảm giác "modal đang chạy", không che kín
+   trang. Giao diện phía sau vẫn hiện và các ô số được loading_skeleton bật lên
+   để người xem thấy dữ liệu sắp cập nhật ở đâu. */
 .loader-screen {
   position: fixed;
   inset: 0;
+  /* Cột menu dọc nằm ngoài lớp phủ thinking/result để luôn thao tác được. */
+  left: var(--sidebar-width);
   z-index: 80;
+  /* Hàng 1 là nội dung có thể cuộn, hàng 2 là khung nút cố định. Nhờ tách hàng
+     mà log thinking dài ra hay tab result đổi nội dung đều không đẩy nút đi. */
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-items: center;
+  justify-items: center;
+  gap: 14px;
+  padding: 24px;
+  background: var(--overlay);
+  transition: opacity 0.45s ease, visibility 0.45s ease;
+}
+
+.overlay-stage {
   display: grid;
   place-items: center;
-  padding: 24px;
-  background: radial-gradient(circle at 50% 32%, var(--surface) 0%, var(--bg) 64%);
-  transition: opacity 0.45s ease, visibility 0.45s ease;
+  width: 100%;
+  min-height: 0;
+}
+
+/* Sau khi chạy xong, lớp phủ nhẹ đi để lộ các ô số đang skeleton phía sau.
+   Panel kết quả cũng được thu hẹp ở dưới đây cho cùng mục đích. */
+.loader-screen.is-result {
+  background: var(--overlay);
 }
 
 .loader-screen.is-hidden {
@@ -1647,16 +2228,15 @@ tbody tr.is-unreliable td:first-child {
   pointer-events: none;
 }
 
-/* Khoá cuộn nền khi lớp phủ đang bật, tránh người xem lỡ cuộn xuống thấy
-   kết quả trong lúc hệ thống còn đang chạy. */
-body.is-processing {
-  overflow: hidden;
-}
-
 .loader-panel {
   width: min(440px, 100%);
-  max-height: calc(100vh - 32px);
+  max-height: min(62vh, 560px);
   overflow-y: auto;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-lift);
   text-align: center;
 }
 
@@ -1829,38 +2409,33 @@ body.is-processing {
   to { opacity: 1; transform: translateY(0); }
 }
 
-.loader-track {
-  height: 7px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--track);
-}
-
-.loader-fill {
-  width: 0;
-  height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--accent), var(--violet));
-  transition: width 0.4s ease;
-}
-
-/* Khi chưa biết chính xác tiến độ (chờ API), cho thanh chạy qua lại. */
-.loader-track.is-indeterminate .loader-fill {
-  width: 38%;
-  animation: loader-slide 1.5s ease-in-out infinite;
-}
-
-@keyframes loader-slide {
-  0% { transform: translateX(-110%); }
-  100% { transform: translateX(360%); }
-}
-
 .loader-timer {
   min-height: 18px;
   margin: 10px 0 0;
   font-size: 12px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* Nút huỷ nằm trong khung nút chung của overlay, không còn nằm trong panel. */
+.loader-cancel {
+  margin: 0;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.loader-cancel:hover {
+  border-color: var(--fake-line);
+  background: var(--fake-soft);
+  color: var(--fake-ink, var(--fake));
 }
 
 .replay-button {
@@ -2122,6 +2697,71 @@ body.is-processing {
   color: var(--ink);
 }
 
+/* ---------- Động tác có chủ đích ---------- */
+/* Nén lò xo khi bấm nút/thẻ/card. Biên độ nhỏ, dùng transform nên không đẩy
+   layout; buông ra thì về đúng transition riêng của từng thành phần. */
+button:not(:disabled):active,
+.category-card:active,
+.kpi:active,
+.preview-card:active,
+.page-button:not(:disabled):active {
+  transform: scale(0.97);
+  transition-duration: 130ms;
+  transition-timing-function: cubic-bezier(.2, .9, .25, 1.4);
+}
+
+/* Sóng nước + vài hạt sáng khi bấm vào khoảng trống. Chỉ transform/opacity. */
+.live-ripple,
+.live-particle {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 9999;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.live-ripple {
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  background: var(--accent-soft);
+  opacity: 0.5;
+  transform: translate3d(var(--x), var(--y), 0) scale(0.3);
+  animation: live-ripple 620ms cubic-bezier(.2, .7, .3, 1) forwards;
+}
+
+@keyframes live-ripple {
+  to {
+    transform: translate3d(var(--x), var(--y), 0) scale(5.5);
+    opacity: 0;
+  }
+}
+
+.live-particle {
+  width: 4px;
+  height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.7;
+  transform: translate3d(var(--x), var(--y), 0);
+  animation: live-particle 620ms ease-out forwards;
+}
+
+@keyframes live-particle {
+  to {
+    transform: translate3d(
+      calc(var(--x) + var(--dx)),
+      calc(var(--y) + var(--dy)),
+      0
+    ) scale(0.2);
+    opacity: 0;
+  }
+}
+
 /* ---------- Màn hình hẹp ---------- */
 @media (max-width: 720px) {
   .star-row {
@@ -2177,22 +2817,458 @@ body.is-processing {
 }
 
 /* Người dùng bật giảm chuyển động: giữ nguyên bố cục, chỉ bỏ phần chuyển
-   động của giọt lỏng và thanh tiến độ. */
+   động của giọt lỏng, hover hàng review, nhịp thở và hiệu ứng bấm. */
 @media (prefers-reduced-motion: reduce) {
-  .goo-blob {
+  .goo-blob,
+  .card::after,
+  .star-meter-button.is-pulsing .star-meter-track {
     animation: none;
   }
 
+  .card::after {
+    opacity: 0.1;
+  }
+
   .loader-screen,
-  .loader-fill {
+  .star-meter-fill {
     transition: none;
+  }
+
+  #table-body tr,
+  #table-body tr:hover {
+    transition: none;
+    transform: none;
+    box-shadow: none;
+  }
+
+  button:not(:disabled):active,
+  .category-card:active,
+  .kpi:active,
+  .preview-card:active,
+  .page-button:not(:disabled):active {
+    transform: none;
+  }
+
+  .live-ripple,
+  .live-particle {
+    display: none;
+  }
+
+  main > .card.is-entering,
+  main .category-card.is-entering {
+    animation: none;
   }
 
   .loader-log-item {
     animation: none;
   }
 
-  .loader-track.is-indeterminate .loader-fill {
-    animation-duration: 3s;
+  .is-loading-skeleton {
+    animation: none;
+    background-position: 50% 0;
+  }
+}
+
+/* ---------- Xem trước dữ liệu demo ở trang chính ---------- */
+/* Bảng và thanh lọc nằm trong cùng một khối preview-panel, mở/bấm nút mới hiện.
+   Các khoảng cách dùng cùng nhịp 8px với phần còn lại để không bị xộc xệch. */
+.preview-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.preview-filter {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-soft);
+}
+
+.preview-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.preview-filter-label {
+  flex: 0 0 auto;
+  min-width: 62px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.preview-filter input[type="search"] {
+  flex: 1 1 260px;
+  min-width: 0;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.preview-filter input[type="search"]::placeholder {
+  color: var(--muted);
+}
+
+.preview-filter .hint {
+  margin: 0;
+}
+
+.preview-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.preview-filter-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+  border-right: 1px solid var(--line);
+}
+
+.preview-filter-group:last-child {
+  padding-right: 0;
+  border-right: 0;
+}
+
+.preview-filter-group-label {
+  margin-right: 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.preview-filter-chip {
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.preview-filter-chip:hover {
+  border-color: var(--accent-line);
+}
+
+.preview-filter-chip.is-active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.preview-card .table-wrap,
+.result-table-wrap.infinite-scroll-wrap {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.preview-card .table-wrap {
+  max-height: 360px;
+}
+
+.result-table-wrap.infinite-scroll-wrap {
+  max-height: 260px;
+}
+
+.infinite-status {
+  margin: 8px 0 0;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-card .result-table td:nth-child(2) {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#table-body mark,
+.preview-card .result-table td:nth-child(2) mark,
+.result-table-wrap.infinite-scroll-wrap mark {
+  padding: 0 1px;
+  border-radius: 3px;
+  background: var(--warn-soft, var(--accent-soft));
+  color: var(--ink);
+}
+
+.train-button {
+  white-space: nowrap;
+  /* Đổi chữ "Chạy file huấn luyện" -> "Chạy lại quá trình" không được làm
+     dãy nút đầu trang giãn ra và đẩy công tắc nền tối sang phải. */
+  min-width: 172px;
+}
+
+/* Tách riêng phần số trong nhãn "6.062 review" để skeleton/đếm tốc độ chỉ
+   tác động vào chữ số, chữ "review" vẫn đứng yên. */
+.preview-count-number {
+  display: inline-block;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Bảng kết quả thay cho màn hình thinking ---------- */
+.loader-screen.is-result .loader-panel {
+  display: none;
+}
+
+/* Result panel thu gọn: đủ rộng để đọc 6 tab nhưng vẫn hở hai bên để thấy
+   các ô số/skeleton đang chạy phía sau trước khi bấm Đóng. */
+.result-panel {
+  width: min(640px, 100%);
+  max-height: min(62vh, 560px);
+  overflow-y: auto;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-lift);
+  text-align: left;
+}
+
+.result-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.result-head h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.result-head .loader-kicker {
+  margin-bottom: 4px;
+}
+
+.result-head .hint {
+  margin: 0;
+}
+
+.result-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.result-tab {
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.result-tab:hover {
+  border-color: var(--accent-line);
+}
+
+.result-tab.is-active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.result-block {
+  margin-bottom: 16px;
+}
+
+.result-block h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.result-block .hint {
+  margin: 0 0 10px;
+}
+
+.result-table-wrap {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.result-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.result-table th,
+.result-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.result-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.result-table td {
+  color: var(--ink);
+}
+
+.result-table td:nth-child(2) {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 240px;
+}
+
+/* Khung nút chung của overlay: chiều cao cố định, căn giữa. Trước khi xong là
+   nút Huỷ, sau khi xong là cụm Đóng/Chạy lại cùng nằm ở đây. */
+.overlay-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: min(640px, 100%);
+  min-height: 74px;
+}
+
+.overlay-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+}
+
+.overlay-note {
+  margin: 0;
+  min-height: 1.3em;
+  text-align: center;
+}
+
+.result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.result-actions[hidden],
+.loader-cancel[hidden] {
+  display: none;
+}
+
+/* ---------- Skeleton chỉ cho ô số ---------- */
+/* loading_skeleton() trong app.js chỉ gắn class này vào các nút chứa số. Tiêu
+   đề, mô tả và chữ đơn vị giữ nguyên, nên người xem vẫn biết đang chờ ô nào. */
+.is-loading-skeleton {
+  position: relative;
+  display: inline-block;
+  min-width: 2.8em;
+  min-height: 1em;
+  border-radius: 7px;
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 20%,
+    var(--track) 42%,
+    var(--surface-2) 64%
+  );
+  background-size: 320% 100%;
+  animation: skeleton-shimmer 1.25s ease-in-out infinite;
+  color: transparent !important;
+  user-select: none;
+  vertical-align: middle;
+}
+
+.is-loading-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+@keyframes skeleton-shimmer {
+  0% { background-position: 120% 0; }
+  100% { background-position: -120% 0; }
+}
+
+/* Hiệu ứng "xe tăng tốc" chỉ làm nổi bật chữ số. Phần progress nằm ở thanh
+   .category-bar-fill của chính thẻ nhóm, do app.js cập nhật theo từng khung hình. */
+.is-number-rushing {
+  color: var(--accent-text);
+  text-shadow: 0 0 10px var(--accent-ring);
+}
+
+@media (max-width: 640px) {
+  /* Điện thoại vẫn giữ cột dọc, nhưng chỉ hiện icon để bảng còn chỗ. */
+  :root,
+  :root[data-sidebar="collapsed"] {
+    --sidebar-width: 58px;
+  }
+
+  .menu-sidebar {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+
+  .menu-item-text,
+  .menu-brand-text,
+  .menu-toggle-text {
+    display: none;
+  }
+
+  .menu-item,
+  .menu-toggle {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .result-panel {
+    padding: 16px;
+  }
+
+  .result-table td:nth-child(2) {
+    max-width: 180px;
   }
 }
